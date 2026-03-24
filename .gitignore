@@ -1,0 +1,48 @@
+
+# VS Code / Copilot AI rules
+.github/instructions/codacy.instructions.md
+
+# Environment variables (may contain secrets)
+.env
+!.env.example
+
+# Runtime state
+.dev-pids.json
+
+# Python virtualenv & cache
+.venv/
+Pipfile.lock
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+
+# Node / Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+node_modules/
+
+# Build outputs
+dist/
+build/
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.idea/
+*.swp
+*.swo
+*.orig
+
+# Logs
+*.log
+npm-debug.log*
+
+# Docker volumes / temp
+*.pid

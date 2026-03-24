@@ -1,0 +1,323 @@
+{
+  "ontology": {
+    "name": "DataLineageMetaModel",
+    "version": "1.2",
+    "description": "Code-driven lineage, execution graph, pipeline dependencies, and alias-based semantic layer"
+  },
+
+  "constraints": [
+    { "label": "DataSource", "property": "id", "type": "UNIQUE" },
+    { "label": "Dataset", "property": "id", "type": "UNIQUE" },
+    { "label": "Column", "property": "id", "type": "UNIQUE" },
+    { "label": "Script", "property": "id", "type": "UNIQUE" },
+    { "label": "Job", "property": "id", "type": "UNIQUE" },
+    { "label": "Transformation", "property": "id", "type": "UNIQUE" },
+    { "label": "Dashboard", "property": "id", "type": "UNIQUE" },
+    { "label": "Alias", "property": "id", "type": "UNIQUE" }
+  ],
+
+  "indexes": [
+    { "label": "Dataset", "property": "name" },
+    { "label": "Column", "property": "name" },
+    { "label": "Job", "property": "name" },
+    { "label": "Script", "property": "name" },
+    { "label": "Transformation", "property": "type" },
+    { "label": "Dashboard", "property": "name" },
+    { "label": "DataSource", "property": "name" },
+    { "label": "Alias", "property": "name" }
+  ],
+
+  "nodes": {
+    "DataSource": {
+      "description": "Represents source or target system",
+      "properties": {
+        "id": "string",
+        "name": "string",
+        "type": "database|api|file|stream",
+        "subtype": "string",
+        "host": "string",
+        "port": "integer",
+        "environment": "dev|qa|prod",
+        "region": "string",
+        "owner": "string",
+        "status": "active|deprecated",
+        "created_at": "datetime",
+        "updated_at": "datetime",
+        "tags": "array<string>"
+      }
+    },
+
+    "Dataset": {
+      "description": "Represents table/file/stream",
+      "properties": {
+        "id": "string",
+        "name": "string",
+        "qualified_name": "string",
+        "type": "table|view|file",
+        "format": "parquet|csv|delta",
+        "size": "long",
+        "row_count": "long",
+        "schema_version": "string",
+        "datasource_id": "string",
+        "location": "string",
+        "partition_keys": "array<string>",
+        "primary_keys": "array<string>",
+        "refresh_frequency": "string",
+        "owner": "string",
+        "status": "active|deprecated",
+        "created_at": "datetime",
+        "updated_at": "datetime",
+        "tags": "array<string>",
+        "description": "string"
+      }
+    },
+
+    "Column": {
+      "description": "Represents dataset column",
+      "properties": {
+        "id": "string",
+        "name": "string",
+        "qualified_name": "string",
+        "dataset_id": "string",
+        "data_type": "string",
+        "nullable": "boolean",
+        "default_value": "string",
+        "is_primary_key": "boolean",
+        "is_foreign_key": "boolean",
+        "ordinal_position": "integer",
+        "distinct_count": "long",
+        "min_value": "string",
+        "max_value": "string",
+        "sample_values": "array<string>",
+        "pii_flag": "boolean",
+        "sensitive_flag": "boolean",
+        "created_at": "datetime",
+        "updated_at": "datetime",
+        "description": "string",
+        "tags": "array<string>"
+      }
+    },
+
+    "Alias": {
+      "description": "Represents standardized or alternate naming for columns across pipelines",
+      "properties": {
+        "id": "string",
+        "name": "string",
+        "type": "standard|business|technical",
+        "domain": "string",
+        "description": "string",
+        "created_at": "datetime",
+        "updated_at": "datetime",
+        "tags": "array<string>"
+      }
+    },
+
+    "Transformation": {
+      "description": "Represents transformation logic",
+      "properties": {
+        "id": "string",
+        "type": "JOIN|FILTER|AGGREGATION|DERIVATION",
+        "subtype": "string",
+        "logic": "string",
+        "normalized_logic": "string",
+        "language": "SQL|PySpark",
+        "complexity_score": "integer",
+        "is_aggregation": "boolean",
+        "is_join": "boolean",
+        "is_filter": "boolean",
+        "input_count": "integer",
+        "output_count": "integer",
+        "line_start": "integer",
+        "line_end": "integer",
+        "column_level": "boolean",
+        "created_at": "datetime",
+        "updated_at": "datetime"
+      }
+    },
+
+    "Script": {
+      "description": "Represents executable code file",
+      "properties": {
+        "id": "string",
+        "name": "string",
+        "path": "string",
+        "repository": "string",
+        "branch": "string",
+        "version": "string",
+        "language": "SQL|Python|PySpark",
+        "size": "integer",
+        "hash": "string",
+        "last_modified": "datetime",
+        "author": "string",
+        "owner": "string",
+        "execution_engine": "spark|dbt|sql_engine",
+        "schedule": "string",
+        "created_at": "datetime",
+        "updated_at": "datetime",
+        "tags": "array<string>"
+      }
+    },
+
+    "Job": {
+      "description": "Represents pipeline/use case (semantic layer)",
+      "properties": {
+        "id": "string",
+        "name": "string",
+        "type": "batch|streaming",
+        "description": "string",
+        "domain": "string",
+        "pipeline_tool": "airflow|dbt",
+        "schedule": "string",
+        "sla": "string",
+        "retry_policy": "string",
+        "owner": "string",
+        "team": "string",
+        "priority": "string",
+        "status": "active|failed|deprecated",
+        "created_at": "datetime",
+        "updated_at": "datetime",
+        "tags": "array<string>"
+      }
+    },
+
+    "Dashboard": {
+      "description": "Represents BI/dashboard layer",
+      "properties": {
+        "id": "string",
+        "name": "string",
+        "tool": "PowerBI|Tableau|Superset",
+        "workspace": "string",
+        "url": "string",
+        "refresh_schedule": "string",
+        "owner": "string",
+        "team": "string",
+        "usage_count": "integer",
+        "last_accessed": "datetime",
+        "status": "active|deprecated",
+        "created_at": "datetime",
+        "updated_at": "datetime",
+        "tags": "array<string>",
+        "description": "string"
+      }
+    }
+  },
+
+  "relationships": [
+    {
+      "type": "HAS_DATASET",
+      "from": "DataSource",
+      "to": "Dataset",
+      "properties": {}
+    },
+    {
+      "type": "HAS_COLUMN",
+      "from": "Dataset",
+      "to": "Column",
+      "properties": {}
+    },
+    {
+      "type": "READS_FROM",
+      "from": "Job",
+      "to": "Dataset",
+      "properties": {
+        "mode": "full|incremental",
+        "timestamp": "datetime"
+      }
+    },
+    {
+      "type": "WRITES_TO",
+      "from": "Job",
+      "to": "Dataset",
+      "properties": {
+        "mode": "overwrite|append",
+        "timestamp": "datetime"
+      }
+    },
+    {
+      "type": "PART_OF",
+      "from": "Script",
+      "to": "Job",
+      "properties": {}
+    },
+    {
+      "type": "CONTAINS",
+      "from": "Script",
+      "to": "Transformation",
+      "properties": {}
+    },
+    {
+      "type": "READS_FROM",
+      "from": "Script",
+      "to": "Dataset",
+      "properties": {}
+    },
+    {
+      "type": "WRITES_TO",
+      "from": "Script",
+      "to": "Dataset",
+      "properties": {}
+    },
+    {
+      "type": "USES",
+      "from": "Transformation",
+      "to": "Column",
+      "properties": {
+        "role": "input|filter|join_key"
+      }
+    },
+    {
+      "type": "PRODUCES",
+      "from": "Transformation",
+      "to": "Column",
+      "properties": {}
+    },
+    {
+      "type": "DERIVED_FROM",
+      "from": "Column",
+      "to": "Column",
+      "properties": {
+        "transformation": "string",
+        "confidence": "float"
+      }
+    },
+    {
+      "type": "HAS_ALIAS",
+      "from": "Column",
+      "to": "Alias",
+      "properties": {
+        "confidence": "float",
+        "source": "manual|auto",
+        "created_at": "datetime"
+      }
+    },
+    {
+      "type": "USES",
+      "from": "Dashboard",
+      "to": "Dataset",
+      "properties": {
+        "usage_type": "report|analysis",
+        "frequency": "string"
+      }
+    },
+    {
+      "type": "DEPENDS_ON",
+      "from": "Job",
+      "to": "Job",
+      "properties": {
+        "type": "data_dependency|execution_dependency",
+        "critical": "boolean",
+        "created_at": "datetime"
+      }
+    },
+    {
+      "type": "DEPENDS_ON",
+      "from": "Script",
+      "to": "Script",
+      "properties": {
+        "type": "execution_order|logical_dependency",
+        "sequence": "integer",
+        "created_at": "datetime"
+      }
+    }
+  ]
+}

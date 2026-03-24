@@ -1,0 +1,18 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+RUN pip install --no-cache-dir pipenv
+
+COPY Pipfile Pipfile.lock* ./
+RUN PIPENV_VENV_IN_PROJECT=1 pipenv install --deploy --ignore-pipfile || pipenv install
+
+# Copy backend source and sample data
+COPY backend/ ./backend/
+COPY sample_repo/ ./sample_repo/
+
+RUN adduser --disabled-password --gecos "" appuser && chown -R appuser /app
+USER appuser
+
+EXPOSE 8000
+CMD ["pipenv", "run", "uvicorn", "main:app", "--app-dir", "backend", "--host", "0.0.0.0", "--port", "8000"]
