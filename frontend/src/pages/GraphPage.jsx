@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { Search, Play, Share2, Table2 } from 'lucide-react'
-import { runCypher, runCypherVisual, fetchJobs, fetchDatasets } from '../services/api'
+import { runCypher, fetchJobs, fetchDatasets } from '../services/api'
 import BloomGraph from '../components/BloomGraph'
 import toast from 'react-hot-toast'
 
@@ -33,23 +33,23 @@ function CellValue({ v }) {
 export default function GraphPage() {
   const [query,        setQuery]       = useState(SAMPLE_QUERIES[2].q)   // default: Job→Dataset
   const [results,      setResults]     = useState(null)
-  const [loading,   setLoading]  = useState(false)
-  const [tab,       setTab]      = useState('query')   // 'query' | 'jobs' | 'datasets'
-  const [viewMode,  setViewMode] = useState('graph')   // 'table' | 'graph'
-  const [search,    setSearch]   = useState('')
-  const [listData,  setListData] = useState([])
-  const [graphData, setGraphData] = useState({ nodes: [], edges: [] })
+  const [loading,   setLoading]     = useState(false)
+  const [tab,       setTab]         = useState('query')
+  const [viewMode,  setViewMode]    = useState('graph')
+  const [search,    setSearch]      = useState('')
+  const [listData,  setListData]    = useState([])
+  // In graph mode, activeCypher drives the NeoVis render directly
+  const [activeCypher, setActiveCypher] = useState(SAMPLE_QUERIES[2].q)
 
   // ── Execute query ─────────────────────────────────────────────────────────
   async function executeQuery() {
     setLoading(true)
     setResults(null)
-    setGraphData({ nodes: [], edges: [] })
     try {
       if (viewMode === 'graph') {
-        const data = await runCypherVisual(query)
-        setGraphData({ nodes: data.nodes || [], edges: data.edges || [] })
-        setResults({ type: 'graph', nodeCount: (data.nodes || []).length, edgeCount: (data.edges || []).length })
+        // NeoVis connects to AuraDB directly — just update the cypher prop
+        setActiveCypher(query)
+        setResults({ type: 'graph' })
       } else {
         const data = await runCypher(query)
         setResults({ type: 'table', ...data })
@@ -76,8 +76,10 @@ export default function GraphPage() {
     if (tab === 'query') executeQuery()
   }, [viewMode]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Auto-run on first load
-  useEffect(() => { executeQuery() }, [])  // eslint-disable-line react-hooks/exhaustive-deps
+  // Auto-run on first load — for graph mode NeoVis renders immediately via activeCypher
+  useEffect(() => {
+    if (tab === 'query' && viewMode !== 'graph') executeQuery()
+  }, [])  // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (tab === 'jobs') loadJobs()
@@ -170,15 +172,13 @@ export default function GraphPage() {
             />
           </div>
 
-          {/* ── Graph view ── */}
-          {results?.type === 'graph' && (
-            <div className="space-y-2">
-              <span className="text-xs text-zinc-500">
-                {results.nodeCount} node{results.nodeCount !== 1 ? 's' : ''} &nbsp;·&nbsp;
-                {results.edgeCount} edge{results.edgeCount !== 1 ? 's' : ''}
-                &nbsp;·&nbsp; Drag nodes · scroll to zoom · click to inspect
+          {/* ── Graph view (NeoVis → AuraDB) ── */}
+          {viewMode === 'graph' && (
+            <div className="space-y-1.5">
+              <span className="text-xs text-zinc-600">
+                Direct connection to Neo4j AuraDB · drag · scroll to zoom · hover for details
               </span>
-              <BloomGraph nodes={graphData.nodes} edges={graphData.edges} height={560} />
+              <BloomGraph cypher={activeCypher} height={560} />
             </div>
           )}
 

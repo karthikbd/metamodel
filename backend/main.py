@@ -72,6 +72,20 @@ def get_config():
     }
 
 
+@app.get("/api/neo4j-creds")
+def get_neo4j_creds():
+    """
+    Return Neo4j connection credentials for NeoVis.js (browser Bolt connection).
+    Intended for internal/dev use — guard with auth middleware in production.
+    """
+    return {
+        "uri":      active_uri() or settings.neo4j_uri,
+        "user":     settings.effective_user,
+        "password": settings.neo4j_password,
+        "database": settings.neo4j_database or None,
+    }
+
+
 @app.post("/api/shutdown")
 def shutdown():
     os.kill(os.getpid(), signal.SIGTERM)

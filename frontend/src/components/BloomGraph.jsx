@@ -1,31 +1,36 @@
 /**
- * BloomGraph — Neo4j Bloom-style force-directed graph using react-force-graph-2d.
+ * NeoVisGraph — wraps neovis.js to render a real Neo4j Bloom-style force graph
+ * directly from your AuraDB instance via Bolt WebSocket.
+ *
+ * NOTE: This file is named BloomGraph.jsx for backwards-compat with existing imports.
  *
  * Props:
- *   nodes        [{id, name, type, ...}]
- *   edges        [{src, tgt, rel, ...}]   (also accepts {source, target} format)
- *   height       number (default 560)
- *   selectedId   string | null — externally controlled selection (optional)
- *   onNodeClick  (node | null) => void — when provided, selection is fully controlled
- *                from outside; when absent, BloomGraph manages its own info-panel
+ *   cypher    {string}   Cypher query to visualise (re-renders on change)
+ *   height    {number}   Canvas height in px  (default 560)
+ *   onStable  {fn}       Called once the physics stabilises
+ *
+ * Legacy props (nodes/edges/selectedId/onNodeClick) are accepted but ignored —
+ * NeoVis fetches data directly from AuraDB via the Cypher prop.
  */
+// ── visuals ───────────────────────────────────────────────────────────────────
 
-import { useRef, useEffect, useState, useMemo, useCallback } from 'react'
-import ForceGraph2D from 'react-force-graph-2d'
-import { X, Info } from 'lucide-react'
-
-// ── Palette ────────────────────────────────────────────────────────────────────
-
-const NODE_PALETTE = {
-  Job:          { fill: '#3b0764', stroke: '#9333ea', text: '#e9d5ff' },
-  Dataset:      { fill: '#1e3a5f', stroke: '#3b82f6', text: '#bfdbfe' },
-  BusinessRule: { fill: '#064e3b', stroke: '#10b981', text: '#a7f3d0' },
-  Column:       { fill: '#134e4a', stroke: '#14b8a6', text: '#99f6e4' },
-  Script:       { fill: '#831843', stroke: '#ec4899', text: '#fce7f3' },
-  _default:     { fill: '#27272a', stroke: '#71717a', text: '#d4d4d8' },
+const LABEL_COLORS = {
+  Job:          { background: '#2d1b4e', border: '#9333ea', hover: { background: '#3b1f63', border: '#a855f7' } },
+  Dataset:      { background: '#1e3a5f', border: '#3b82f6', hover: { background: '#25476e', border: '#60a5fa' } },
+  BusinessRule: { background: '#083d30', border: '#10b981', hover: { background: '#0a4d3b', border: '#34d399' } },
+  Column:       { background: '#0f3835', border: '#14b8a6', hover: { background: '#154845', border: '#2dd4bf' } },
+  Script:       { background: '#4a0e2e', border: '#ec4899', hover: { background: '#5e1239', border: '#f472b6' } },
 }
 
-const LINK_COLORS = {
+const LABEL_FONT = {
+  Job:          '#e9d5ff',
+  Dataset:      '#bfdbfe',
+  BusinessRule: '#a7f3d0',
+  Column:       '#99f6e4',
+  Script:       '#fce7f3',
+}
+
+const REL_COLORS = {
   READS_FROM:   '#3b82f6',
   WRITES_TO:    '#f59e0b',
   DEPENDS_ON:   '#a78bfa',
@@ -33,220 +38,166 @@ const LINK_COLORS = {
   DERIVED_FROM: '#f472b6',
   REFERENCES:   '#fb923c',
   JOINS_WITH:   '#38bdf8',
+  HAS_COLUMN:   '#52525b',
 }
 
-const NODE_R = 9
-const LABEL_MAX = 18
+// ── component ─────────────────────────────────────────────────────────────────
 
-// ── Component ──────────────────────────────────────────────────────────────────
+import { useEffect, useRef, useState } from 'react'
 
-export default function BloomGraph({
-  nodes = [],
-  edges = [],
-  height = 560,
-  selectedId = null,
-  onNodeClick,
-}) {
-  const containerRef = useRef(null)
-  const [cWidth, setCWidth] = useState(900)
+let _instanceCounter = 0
 
-  // Internal selection state — only used when caller does NOT pass onNodeClick
-  const [internalSel, setInternalSel] = useState(null)
-  const effectiveSel = onNodeClick ? selectedId : internalSel
+export default function NeoVisGraph({ cypher, height = 560, onStable }) {
+  // stable unique DOM id per mount
+  const idRef    = useRef(`neovis-${++_instanceCounter}`)
+  const vizRef   = useRef(null)
+  const [status, setStatus] = useState('loading')   // loading | ready | error
+  const [msg,    setMsg]    = useState('')
 
-  // ── Responsive width ─────────────────────────────────────────────────────────
+  // ── 1. Build and mount NeoVis ─────────────────────────────────────────────
   useEffect(() => {
-    if (!containerRef.current) return
-    const ro = new ResizeObserver(([entry]) => {
-      setCWidth(Math.floor(entry.contentRect.width))
+    let cancelled = false
+
+    async function init() {
+      // Fetch Neo4j credentials from backend (avoids baking them into the bundle)
+      const res = await fetch('/api/neo4j-creds')
+      if (!res.ok) throw new Error(`/api/neo4j-creds returned ${res.status}`)
+      const creds = await res.json()
+      if (cancelled) return
+
+      // Dynamic import keeps neovis.js out of the SSR/build critical path
+      const { default: NeoVis } = await import('neovis.js')
+      const DC = NeoVis.NEOVIS_DEFAULT_CONFIG   // symbol key for default per-label options
+      if (cancelled) return
+
+      // Build per-label config
+      const labels = {}
+      Object.entries(LABEL_COLORS).forEach(([lbl, col]) => {
+        labels[lbl] = {
+          label: 'name',
+          [DC]: {
+            color: col,
+            font:  { color: LABEL_FONT[lbl] || '#e4e4e7', size: 13, face: 'JetBrains Mono, monospace' },
+            size:  22,
+            shape: 'dot',
+          },
+        }
+      })
+
+      // Build per-relationship config
+      const relationships = {}
+      Object.entries(REL_COLORS).forEach(([rel, color]) => {
+        relationships[rel] = {
+          [DC]: {
+            color: { color, hover: color, opacity: 0.85 },
+            font:  { color: '#71717a', size: 10, face: 'JetBrains Mono, monospace', align: 'middle' },
+          },
+        }
+      })
+
+      const viz = new NeoVis({
+        containerId: idRef.current,
+        neo4j: {
+          serverUrl:      creds.uri,
+          serverUser:     creds.user,
+          serverPassword: creds.password,
+          ...(creds.database ? { serverDatabase: creds.database } : {}),
+        },
+        labels,
+        relationships,
+        initialCypher: cypher || 'MATCH (n)-[r]->(m) RETURN n, r, m LIMIT 80',
+        visConfig: {
+          nodes: {
+            shape:       'dot',
+            size:        22,
+            borderWidth: 2,
+            font: { color: '#e4e4e7', size: 13, face: 'JetBrains Mono, monospace' },
+          },
+          edges: {
+            arrows:  { to: { enabled: true, scaleFactor: 0.6 } },
+            smooth:  { type: 'dynamic' },
+            width:   1.5,
+            font:    { color: '#71717a', size: 10, face: 'JetBrains Mono, monospace', align: 'middle' },
+          },
+          physics: {
+            enabled: true,
+            solver:  'forceAtlas2Based',
+            forceAtlas2Based: {
+              gravitationalConstant: -50,
+              centralGravity:        0.01,
+              springLength:          130,
+              springConstant:        0.08,
+            },
+            stabilization: { iterations: 200, updateInterval: 25 },
+          },
+          interaction: { hover: true, tooltipDelay: 300, navigationButtons: true, keyboard: true },
+          background:  { color: '#0c0c0e' },
+        },
+      })
+
+      viz.registerOnEvent(NeoVis.NeoVisEvents.CompletionEvent, () => {
+        if (!cancelled) {
+          setStatus('ready')
+          if (onStable) onStable()
+        }
+      })
+
+      viz.render()
+      vizRef.current = viz
+    }
+
+    init().catch(err => {
+      if (!cancelled) { setStatus('error'); setMsg(err.message) }
     })
-    ro.observe(containerRef.current)
-    return () => ro.disconnect()
-  }, [])
 
-  // ── graphData — shallow-clone so ForceGraph2D can mutate x/y freely ──────────
-  const graphData = useMemo(() => ({
-    nodes: nodes.map(n => ({ ...n })),
-    links: edges.map(e => ({
-      ...e,
-      source: e.src    || e.source || '',
-      target: e.tgt    || e.target || '',
-    })),
-  }), [nodes, edges])  // eslint-disable-line react-hooks/exhaustive-deps
-  // NOTE: intentional key-equality — we want a new simulation whenever the
-  // node/edge arrays themselves change (new fetch), not on every render.
-
-  // ── Custom node canvas renderer ───────────────────────────────────────────────
-  const paintNode = useCallback((node, ctx, gs) => {
-    const pal   = NODE_PALETTE[node.type] || NODE_PALETTE._default
-    const label = node.name || node.id || ''
-    const fs    = Math.max(6, 10 / gs)
-
-    // White ring around the selected node
-    if (node.id === effectiveSel) {
-      ctx.beginPath()
-      ctx.arc(node.x, node.y, NODE_R + 5, 0, 2 * Math.PI)
-      ctx.strokeStyle = 'rgba(255,255,255,0.9)'
-      ctx.lineWidth   = 2 / gs
-      ctx.stroke()
+    return () => {
+      cancelled = true
+      try { vizRef.current?.clearNetwork?.() } catch {}
+      vizRef.current = null
     }
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
-    // Filled circle
-    ctx.beginPath()
-    ctx.arc(node.x, node.y, NODE_R, 0, 2 * Math.PI)
-    ctx.fillStyle   = pal.fill
-    ctx.fill()
-    ctx.strokeStyle = pal.stroke
-    ctx.lineWidth   = 1.5 / gs
-    ctx.stroke()
+  // ── 2. Re-run when query changes ─────────────────────────────────────────
+  useEffect(() => {
+    if (!vizRef.current || !cypher) return
+    setStatus('loading')
+    vizRef.current.renderWithCypher(cypher)
+  }, [cypher])
 
-    // Label below node
-    ctx.font         = `${fs}px 'JetBrains Mono', monospace`
-    ctx.textAlign    = 'center'
-    ctx.textBaseline = 'top'
-    ctx.fillStyle    = pal.text
-    const trunc = label.length > LABEL_MAX ? label.slice(0, LABEL_MAX - 1) + '…' : label
-    ctx.fillText(trunc, node.x, node.y + NODE_R + 2 / gs)
-  }, [effectiveSel])
-
-  // Pointer hit area (must be larger than the visual circle to be easy to click)
-  const paintPointer = useCallback((node, color, ctx) => {
-    ctx.fillStyle = color
-    ctx.beginPath()
-    ctx.arc(node.x, node.y, NODE_R + 4, 0, 2 * Math.PI)
-    ctx.fill()
-  }, [])
-
-  // ── Click handlers ────────────────────────────────────────────────────────────
-  const handleNodeClick = useCallback(node => {
-    if (onNodeClick) {
-      onNodeClick(node)
-    } else {
-      setInternalSel(prev => prev === node.id ? null : node.id)
-    }
-  }, [onNodeClick])
-
-  const handleBgClick = useCallback(() => {
-    if (onNodeClick) onNodeClick(null)
-    else setInternalSel(null)
-  }, [onNodeClick])
-
-  // ── Internal info panel (only when not controlled from outside) ───────────────
-  const internalSelNode = useMemo(() => {
-    if (onNodeClick || !internalSel) return null
-    return nodes.find(n => n.id === internalSel) || null
-  }, [onNodeClick, internalSel, nodes])
-
-  // ── Render ────────────────────────────────────────────────────────────────────
+  // ── render ────────────────────────────────────────────────────────────────
   return (
-    <div
-      className="flex rounded-lg border border-surface-border overflow-hidden"
-      style={{ height }}
-    >
-      {/* ── Canvas panel ──────────────────────────────────────────────────────── */}
-      <div
-        ref={containerRef}
-        className="flex-1 relative"
-        style={{ background: '#09090b', minWidth: 0 }}
-      >
-        {nodes.length === 0 ? (
-          <div className="h-full flex flex-col items-center justify-center gap-2 text-zinc-600 text-sm">
-            <span>No graph data</span>
-            <span className="text-xs text-zinc-700">Run Phase 1 Pipeline to hydrate the graph</span>
-          </div>
-        ) : (
-          <ForceGraph2D
-            graphData={graphData}
-            width={cWidth}
-            height={height}
-            backgroundColor="#09090b"
-            /* node rendering */
-            nodeCanvasObject={paintNode}
-            nodePointerAreaPaint={paintPointer}
-            nodeRelSize={NODE_R}
-            /* edge rendering */
-            linkColor={link => LINK_COLORS[link.rel] || '#52525b'}
-            linkWidth={1.5}
-            linkLabel={link => link.rel || ''}
-            linkDirectionalArrowLength={5}
-            linkDirectionalArrowRelPos={0.9}
-            /* interactions */
-            onNodeClick={handleNodeClick}
-            onBackgroundClick={handleBgClick}
-            /* physics — fade out fast for snappy feel */
-            cooldownTicks={150}
-            d3AlphaDecay={0.025}
-            d3VelocityDecay={0.3}
-          />
-        )}
+    <div className="relative rounded-lg border border-surface-border overflow-hidden"
+         style={{ height, background: '#0c0c0e' }}>
 
-        {/* ── Overlay legend ─────────────────────────────────────────────────── */}
-        {nodes.length > 0 && (
-          <div
-            className="absolute top-3 left-3 flex flex-col gap-1 pointer-events-none
-                       bg-black/50 backdrop-blur-sm rounded-md px-2.5 py-2"
-          >
-            <p className="text-[9px] uppercase tracking-widest text-zinc-600 mb-0.5">Nodes</p>
-            {Object.entries(NODE_PALETTE)
-              .filter(([k]) => k !== '_default')
-              .map(([type, pal]) => (
-                <div key={type} className="flex items-center gap-1.5">
-                  <span
-                    className="w-3 h-3 rounded-full border shrink-0"
-                    style={{ background: pal.fill, borderColor: pal.stroke }}
-                  />
-                  <span className="text-[10px] text-zinc-400">{type}</span>
-                </div>
-              ))}
-            <p className="text-[9px] uppercase tracking-widest text-zinc-600 mt-1.5 mb-0.5">Edges</p>
-            {Object.entries(LINK_COLORS).map(([rel, color]) => (
-              <div key={rel} className="flex items-center gap-1.5">
-                <span className="w-4 h-[2px] rounded shrink-0" style={{ background: color }} />
-                <span className="text-[9px] text-zinc-500">{rel}</span>
-              </div>
-            ))}
-          </div>
-        )}
+      {status === 'loading' && (
+        <div className="absolute inset-0 flex items-center justify-center z-10 pointer-events-none">
+          <span className="text-sm text-zinc-600 animate-pulse">Connecting to Neo4j AuraDB…</span>
+        </div>
+      )}
+      {status === 'error' && (
+        <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 z-10">
+          <p className="text-sm text-red-400 font-medium">Neo4j connection failed</p>
+          <p className="text-xs text-zinc-600 font-mono max-w-xs text-center">{msg}</p>
+          <p className="text-xs text-zinc-700">Check NEO4J_URI / NEO4J_PASSWORD in <code>.env</code></p>
+        </div>
+      )}
 
-        {/* ── Hint ───────────────────────────────────────────────────────────── */}
-        {nodes.length > 0 && (
-          <div className="absolute bottom-3 right-3 text-[9px] text-zinc-700 pointer-events-none">
-            drag · scroll zoom · click node
-          </div>
-        )}
-      </div>
+      {/* NeoVis canvas target */}
+      <div id={idRef.current} style={{ width: '100%', height: '100%' }} />
 
-      {/* ── Internal info panel (uncontrolled mode) ───────────────────────────── */}
-      {internalSelNode && (
-        <div className="w-64 shrink-0 border-l border-surface-border bg-surface-card p-4 text-xs space-y-3 overflow-y-auto">
-          <div className="flex items-center justify-between">
-            <span className="flex items-center gap-1.5 text-zinc-300 font-medium">
-              <Info size={12} /> Node Details
+      {/* Legend */}
+      {status === 'ready' && (
+        <div className="absolute bottom-3 left-3 flex flex-col gap-1.5 pointer-events-none">
+          {Object.entries(LABEL_COLORS).map(([lbl, c]) => (
+            <span key={lbl} className="flex items-center gap-1.5 text-[10px]">
+              <span className="w-2.5 h-2.5 rounded-full border"
+                    style={{ background: c.background, borderColor: c.border }} />
+              <span className="text-zinc-500">{lbl}</span>
             </span>
-            <button
-              onClick={() => setInternalSel(null)}
-              className="text-zinc-600 hover:text-zinc-300"
-            >
-              <X size={13} />
-            </button>
-          </div>
-          {Object.entries(internalSelNode)
-            .filter(([k]) =>
-              !['x', 'y', 'vx', 'vy', 'fx', 'fy', 'index', '__indexColor',
-                '__controlPoints', 'src', 'tgt'].includes(k)
-            )
-            .map(([k, v]) => (
-              <div key={k} className="space-y-0.5">
-                <div className="text-zinc-500 uppercase tracking-wide text-[10px]">{k}</div>
-                <div className="font-mono text-zinc-300 break-all">
-                  {Array.isArray(v)
-                    ? v.length ? v.join(', ') : '—'
-                    : String(v ?? '—')}
-                </div>
-              </div>
-            ))}
+          ))}
         </div>
       )}
     </div>
   )
 }
+
