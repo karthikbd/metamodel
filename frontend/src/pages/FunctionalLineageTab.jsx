@@ -8,7 +8,7 @@ import ReactFlow, {
   MarkerType,
 } from 'reactflow'
 import 'reactflow/dist/style.css'
-import { GitBranch, Loader2 } from 'lucide-react'
+import { GitBranch, Loader2, X, Info } from 'lucide-react'
 import { fetchAllFunctionalLineage } from '../services/api'
 import toast from 'react-hot-toast'
 
@@ -99,6 +99,8 @@ export default function FunctionalLineageTab() {
   const [baseEdges,   setBaseEdges]   = useState([])
   const [nodes, setNodes, onNodesChange] = useNodesState([])
   const [edges, setEdges, onEdgesChange] = useEdgesState([])
+  const [selectedId,  setSelectedId]  = useState(null)
+  const [focusInfo,   setFocusInfo]   = useState(null)   // { name, path, callers[], callees[] }
 
   useEffect(() => {
     fetchAllFunctionalLineage()
@@ -136,8 +138,71 @@ export default function FunctionalLineageTab() {
     })))
   }, [setNodes, setEdges])
 
+  // Highlight selected node + its direct neighbours; populate info panel
+  const applySelection = useCallback((selId, bNodes, bEdges) => {
+    if (!selId) {
+      // Just re-apply filter
+      applyFilter(filter, bNodes, bEdges)
+      setFocusInfo(null)
+      return
+    }
+    const callerEdges  = bEdges.filter(e => e._callerId === selId)
+    const calleeEdges  = bEdges.filter(e => e._calleeId === selId)
+    const neighbourIds = new Set([
+      selId,
+      ...callerEdges.map(e => e._calleeId),
+      ...calleeEdges.map(e => e._callerId),
+    ])
+
+    setNodes(bNodes.map(n => ({
+      ...n,
+      style: {
+        ...n.style,
+        opacity: neighbourIds.has(n.id) ? 1 : 0.08,
+        outline: n.id === selId ? '2px solid #a78bfa' : 'none',
+      },
+    })))
+    setEdges(bEdges.map(e => {
+      const active = e._callerId === selId || e._calleeId === selId
+      return {
+        ...e,
+        style: { ...e.style, opacity: active ? 1 : 0.05, strokeWidth: active ? 2.5 : 1.5 },
+      }
+    }))
+
+    // Build focus info
+    const node = bNodes.find(n => n.id === selId)
+    setFocusInfo({
+      name:    node?._name   || selId,
+      path:    node?._path   || '',
+      callees: callerEdges.map(e => {
+        const t = bNodes.find(n => n.id === e._calleeId)
+        return t?._name || e._calleeId
+      }),
+      callers: calleeEdges.map(e => {
+        const s = bNodes.find(n => n.id === e._callerId)
+        return s?._name || e._callerId
+      }),
+    })
+  }, [filter, applyFilter, setNodes, setEdges])
+
   useEffect(() => {
-    if (baseNodes.length) applyFilter(filter, baseNodes, baseEdges)
+    if (baseNodes.length) {
+      if (selectedId) applySelection(selectedId, baseNodes, baseEdges)
+      else applyFilter(filter, baseNodes, baseEdges)
+    }
+  }, [filter, baseNodes, baseEdges, applyFilter, applySelection, selectedId])
+
+  const handleNodeClick = useCallback((_ev, node) => {
+    const newId = node.id === selectedId ? null : node.id
+    setSelectedId(newId)
+    applySelection(newId, baseNodes, baseEdges)
+  }, [selectedId, baseNodes, baseEdges, applySelection])
+
+  const handlePaneClick = useCallback(() => {
+    setSelectedId(null)
+    applyFilter(filter, baseNodes, baseEdges)
+    setFocusInfo(null)
   }, [filter, baseNodes, baseEdges, applyFilter])
 
   // Stats
@@ -182,18 +247,26 @@ export default function FunctionalLineageTab() {
         ))}
       </div>
 
-      {/* Filter + legend row */}
+      {/* Filter + clear selection row */}
       <div className="flex flex-wrap gap-3 items-center">
         <input
           value={filter}
           onChange={e => setFilter(e.target.value)}
-          placeholder="Highlight functions by nameâ€¦"
+          placeholder="Highlight functions by name…"
           className="bg-surface border border-surface-border rounded-md px-3 py-1.5
                      text-xs text-zinc-200 focus:outline-none focus:border-accent w-56"
         />
         {filter && (
           <button onClick={() => setFilter('')}
-            className="text-xs text-zinc-500 hover:text-zinc-200">âœ• clear</button>
+            className="text-xs text-zinc-500 hover:text-zinc-200">✕ clear filter</button>
+        )}
+        {selectedId && (
+          <button
+            onClick={() => { setSelectedId(null); applyFilter(filter, baseNodes, baseEdges); setFocusInfo(null) }}
+            className="flex items-center gap-1 text-xs text-violet-400 hover:text-violet-200 border border-violet-800 rounded px-2 py-1"
+          >
+            <X size={11} /> Clear selection
+          </button>
         )}
         <div className="flex gap-4 ml-auto text-[10px]">
           {[
@@ -216,6 +289,8 @@ export default function FunctionalLineageTab() {
           edges={edges}
           onNodesChange={onNodesChange}
           onEdgesChange={onEdgesChange}
+          onNodeClick={handleNodeClick}
+          onPaneClick={handlePaneClick}
           fitView
           fitViewOptions={{ padding: 0.1 }}
           style={{ background: '#0c0c0e' }}
@@ -228,6 +303,65 @@ export default function FunctionalLineageTab() {
           />
         </ReactFlow>
       </div>
+
+      {/* Info panel — shown when a node is selected */}
+      {focusInfo && (
+        <div className="rounded-lg border border-violet-800/60 bg-violet-950/30 p-4 text-xs space-y-3">
+          <div className="flex items-center justify-between">
+            <span className="flex items-center gap-1.5 text-violet-300 font-medium">
+              <Info size={13} /> {focusInfo.name}
+            </span>
+            <button
+              onClick={() => { setSelectedId(null); applyFilter(filter, baseNodes, baseEdges); setFocusInfo(null) }}
+              className="text-zinc-600 hover:text-zinc-300"
+            >
+              <X size={13} />
+            </button>
+          </div>
+
+          {focusInfo.path && (
+            <div>
+              <p className="text-zinc-500 mb-0.5">Script path</p>
+              <p className="font-mono text-zinc-300 break-all">{focusInfo.path}</p>
+            </div>
+          )}
+
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <p className="text-zinc-500 mb-1">Called by ({focusInfo.callers.length})</p>
+              {focusInfo.callers.length === 0
+                ? <p className="text-zinc-600 italic">— root (no callers)</p>
+                : focusInfo.callers.map(c => (
+                    <div key={c} className="font-mono text-violet-300 hover:text-violet-100 cursor-pointer
+                                            py-0.5 px-1 rounded hover:bg-violet-900/30 transition-colors"
+                         onClick={() => {
+                           const n = baseNodes.find(n => n._name === c)
+                           if (n) { setSelectedId(n.id); applySelection(n.id, baseNodes, baseEdges) }
+                         }}>
+                      ↑ {c}
+                    </div>
+                  ))
+              }
+            </div>
+            <div>
+              <p className="text-zinc-500 mb-1">Calls into ({focusInfo.callees.length})</p>
+              {focusInfo.callees.length === 0
+                ? <p className="text-zinc-600 italic">— leaf (calls nothing)</p>
+                : focusInfo.callees.map(c => (
+                    <div key={c} className="font-mono text-blue-300 hover:text-blue-100 cursor-pointer
+                                            py-0.5 px-1 rounded hover:bg-blue-900/30 transition-colors"
+                         onClick={() => {
+                           const n = baseNodes.find(n => n._name === c)
+                           if (n) { setSelectedId(n.id); applySelection(n.id, baseNodes, baseEdges) }
+                         }}>
+                      ↓ {c}
+                    </div>
+                  ))
+              }
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

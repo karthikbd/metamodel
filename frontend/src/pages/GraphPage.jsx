@@ -1,7 +1,77 @@
-import { useState, useEffect } from 'react'
-import { Search, Play } from 'lucide-react'
-import { runCypher, fetchJobs, fetchDatasets } from '../services/api'
+import { useState, useEffect, useCallback } from 'react'
+import { Search, Play, Share2, Table2, X, Info } from 'lucide-react'
+import ReactFlow, {
+  Background, Controls, MiniMap,
+  useNodesState, useEdgesState, MarkerType,
+} from 'reactflow'
+import 'reactflow/dist/style.css'
+import { runCypher, runCypherVisual, fetchJobs, fetchDatasets } from '../services/api'
 import toast from 'react-hot-toast'
+
+// ── ReactFlow node/edge helpers ───────────────────────────────────────────────
+
+const TYPE_STYLE = {
+  Job:          { border: '#9333ea', bg: '#1e1529', color: '#c4b5fd' },
+  Dataset:      { border: '#3b82f6', bg: '#0f1228', color: '#93c5fd' },
+  Column:       { border: '#22c55e', bg: '#0a1a0e', color: '#86efac' },
+  BusinessRule: { border: '#f59e0b', bg: '#1a1200', color: '#fcd34d' },
+  Script:       { border: '#ec4899', bg: '#1a0812', color: '#f9a8d4' },
+  Node:         { border: '#52525b', bg: '#18181b', color: '#a1a1aa' },
+}
+
+const MONO = 'JetBrains Mono, monospace'
+const X_GAP = 260
+const Y_GAP = 90
+
+function buildRFGraph(nodes, edges) {
+  // Assign x positions by type bucket, y by index within bucket
+  const buckets = {}
+  nodes.forEach(n => {
+    const t = n.type || 'Node'
+    buckets[t] = buckets[t] || []
+    buckets[t].push(n)
+  })
+  const typeOrder = ['Job', 'Dataset', 'Column', 'BusinessRule', 'Script', 'Node']
+  const orderedTypes = [...new Set([...typeOrder, ...Object.keys(buckets)])]
+
+  const rfNodes = []
+  orderedTypes.forEach((type, colIdx) => {
+    if (!buckets[type]) return
+    buckets[type].forEach((n, rowIdx) => {
+      const s = TYPE_STYLE[type] || TYPE_STYLE.Node
+      const label = n.data?.name || n.id
+      rfNodes.push({
+        id:   n.id,
+        data: { label, raw: n.data },
+        position: { x: colIdx * X_GAP + 40, y: rowIdx * Y_GAP + 40 },
+        style: {
+          background: s.bg,
+          border: `1px solid ${s.border}`,
+          color: s.color,
+          borderRadius: 6,
+          fontSize: 11,
+          fontFamily: MONO,
+          padding: '6px 12px',
+          minWidth: 110,
+          maxWidth: 200,
+          wordBreak: 'break-word',
+        },
+      })
+    })
+  })
+
+  const rfEdges = edges.map((e, i) => ({
+    id:     e.id || `e-${i}`,
+    source: e.source || e.src || '',
+    target: e.target || e.tgt || '',
+    label:  e.label || e.rel || '',
+    style:  { stroke: '#a78bfa', strokeWidth: 1.5 },
+    labelStyle: { fill: '#71717a', fontSize: 9, fontFamily: MONO },
+    markerEnd: { type: MarkerType.ArrowClosed, color: '#a78bfa' },
+  }))
+
+  return { rfNodes, rfEdges }
+}
 
 const SAMPLE_QUERIES = [
   { label: 'All jobs',                q: "MATCH (j:Job) RETURN j.name AS name, coalesce(j.path, j.domain, '') AS path, coalesce(j.risk_tags, []) AS risk_tags LIMIT 25" },
@@ -30,19 +100,37 @@ function CellValue({ v }) {
 }
 
 export default function GraphPage() {
-  const [query,   setQuery]   = useState(SAMPLE_QUERIES[0].q)
-  const [results, setResults] = useState(null)
-  const [loading, setLoading] = useState(false)
-  const [tab,     setTab]     = useState('query')  // 'query' | 'functions' | 'schema'
-  const [search,  setSearch]  = useState('')
-  const [listData, setListData] = useState([])
+  const [query,        setQuery]       = useState(SAMPLE_QUERIES[2].q)   // default: Job→Dataset
+  const [results,      setResults]     = useState(null)
+  const [loading,      setLoading]     = useState(false)
+  const [tab,          setTab]         = useState('query')              // 'query' | 'jobs' | 'datasets'
+  const [viewMode,     setViewMode]    = useState('graph')              // 'table' | 'graph'
+  const [search,       setSearch]      = useState('')
+  const [listData,     setListData]    = useState([])
+  const [selectedNode, setSelectedNode] = useState(null)               // for info panel
 
+  // ReactFlow state
+  const [rfNodes, setRfNodes, onNodesChange] = useNodesState([])
+  const [rfEdges, setRfEdges, onEdgesChange] = useEdgesState([])
+
+  // ── Execute query ─────────────────────────────────────────────────────────
   async function executeQuery() {
     setLoading(true)
     setResults(null)
+    setRfNodes([])
+    setRfEdges([])
+    setSelectedNode(null)
     try {
-      const data = await runCypher(query)
-      setResults(data)
+      if (viewMode === 'graph') {
+        const data = await runCypherVisual(query)
+        const { rfNodes: n, rfEdges: e } = buildRFGraph(data.nodes || [], data.edges || [])
+        setRfNodes(n)
+        setRfEdges(e)
+        setResults({ type: 'graph', nodeCount: (data.nodes || []).length, edgeCount: (data.edges || []).length })
+      } else {
+        const data = await runCypher(query)
+        setResults({ type: 'table', ...data })
+      }
     } catch (err) {
       toast.error(err.response?.data?.detail || 'Query failed')
     } finally {
@@ -60,23 +148,35 @@ export default function GraphPage() {
     setListData(data)
   }
 
-  // Auto-run default Cypher query on first load
+  // Re-run when viewMode changes so the result type matches
+  useEffect(() => {
+    if (tab === 'query') executeQuery()
+  }, [viewMode]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Auto-run on first load
   useEffect(() => { executeQuery() }, [])  // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Auto-load list data whenever the user switches tabs
   useEffect(() => {
     if (tab === 'jobs') loadJobs()
     else if (tab === 'datasets') loadDatasets()
   }, [tab])  // eslint-disable-line react-hooks/exhaustive-deps
 
+  const handleNodeClick = useCallback((_ev, node) => {
+    setSelectedNode(node)
+  }, [])
+
+  const handlePaneClick = useCallback(() => {
+    setSelectedNode(null)
+  }, [])
+
   return (
     <div className="p-6 space-y-4">
       <div>
         <h1 className="text-xl font-semibold text-zinc-100">Graph Explorer</h1>
-        <p className="text-sm text-zinc-500 mt-0.5">Query the Meta Model graph with Cypher</p>
+        <p className="text-sm text-zinc-500 mt-0.5">Query the Meta Model graph with Cypher · visualise as graph or table</p>
       </div>
 
-      {/* Tabs */}
+      {/* Top-level tabs */}
       <div className="flex gap-1 border-b border-surface-border pb-0">
         {[['query','Cypher Query'], ['jobs','Jobs'], ['datasets','Datasets']].map(([id, label]) => (
           <button
@@ -112,7 +212,29 @@ export default function GraphPage() {
           {/* Editor */}
           <div className="card p-0 overflow-hidden">
             <div className="flex items-center justify-between px-4 py-2 border-b border-surface-border bg-surface-card">
-              <span className="text-xs text-zinc-500 font-mono">Cypher</span>
+              {/* View mode toggle */}
+              <div className="flex rounded-md overflow-hidden border border-surface-border text-xs">
+                <button
+                  onClick={() => setViewMode('graph')}
+                  className={`flex items-center gap-1.5 px-3 py-1 transition-colors ${
+                    viewMode === 'graph'
+                      ? 'bg-violet-900/60 text-violet-300'
+                      : 'text-zinc-500 hover:text-zinc-300'
+                  }`}
+                >
+                  <Share2 size={11} /> Graph
+                </button>
+                <button
+                  onClick={() => setViewMode('table')}
+                  className={`flex items-center gap-1.5 px-3 py-1 transition-colors ${
+                    viewMode === 'table'
+                      ? 'bg-blue-900/40 text-blue-300'
+                      : 'text-zinc-500 hover:text-zinc-300'
+                  }`}
+                >
+                  <Table2 size={11} /> Table
+                </button>
+              </div>
               <button
                 onClick={executeQuery}
                 disabled={loading}
@@ -125,7 +247,7 @@ export default function GraphPage() {
               value={query}
               onChange={e => setQuery(e.target.value)}
               onKeyDown={e => { if (e.ctrlKey && e.key === 'Enter') executeQuery() }}
-              rows={5}
+              rows={4}
               className="w-full bg-[#0c0c0e] px-4 py-3 font-mono text-sm text-zinc-200
                          focus:outline-none resize-none"
               placeholder="MATCH (n) RETURN n LIMIT 10"
@@ -133,8 +255,82 @@ export default function GraphPage() {
             />
           </div>
 
-          {/* Results */}
-          {results && (
+          {/* ── Graph view ── */}
+          {results?.type === 'graph' && (
+            <div className="space-y-2">
+              <div className="flex items-center justify-between">
+                <span className="text-xs text-zinc-500">
+                  {results.nodeCount} node{results.nodeCount !== 1 ? 's' : ''} · {results.edgeCount} edge{results.edgeCount !== 1 ? 's' : ''}
+                  {selectedNode && <span className="ml-2 text-violet-400">· click a node to inspect</span>}
+                </span>
+                {/* Legend */}
+                <div className="flex gap-3 text-[10px]">
+                  {Object.entries(TYPE_STYLE).slice(0,4).map(([type, s]) => (
+                    <span key={type} className="flex items-center gap-1">
+                      <span className="w-2.5 h-2.5 rounded border" style={{ borderColor: s.border }} />
+                      <span className="text-zinc-500">{type}</span>
+                    </span>
+                  ))}
+                </div>
+              </div>
+
+              <div className="flex gap-3">
+                {/* ReactFlow canvas */}
+                <div className={`flex-1 rounded-lg border border-surface-border overflow-hidden transition-all ${selectedNode ? 'min-h-[460px]' : 'min-h-[520px]'}`}>
+                  <ReactFlow
+                    nodes={rfNodes}
+                    edges={rfEdges}
+                    onNodesChange={onNodesChange}
+                    onEdgesChange={onEdgesChange}
+                    onNodeClick={handleNodeClick}
+                    onPaneClick={handlePaneClick}
+                    fitView
+                    fitViewOptions={{ padding: 0.15 }}
+                    style={{ background: '#0c0c0e' }}
+                  >
+                    <Background color="#27272a" />
+                    <Controls />
+                    <MiniMap
+                      nodeColor={n => {
+                        const s = TYPE_STYLE[n.data?.raw?.type || 'Node'] || TYPE_STYLE.Node
+                        return s.border
+                      }}
+                      style={{ background: '#18181b', border: '1px solid #27272a' }}
+                    />
+                  </ReactFlow>
+                </div>
+
+                {/* Info panel */}
+                {selectedNode && (
+                  <div className="w-64 rounded-lg border border-surface-border bg-surface-card p-4 text-xs space-y-3 shrink-0">
+                    <div className="flex items-center justify-between">
+                      <span className="flex items-center gap-1.5 text-zinc-300 font-medium">
+                        <Info size={12} /> Node Details
+                      </span>
+                      <button onClick={() => setSelectedNode(null)} className="text-zinc-600 hover:text-zinc-300">
+                        <X size={13} />
+                      </button>
+                    </div>
+                    <div className="space-y-1.5">
+                      <div className="text-zinc-500">ID</div>
+                      <div className="font-mono text-zinc-300 break-all">{selectedNode.id}</div>
+                    </div>
+                    {selectedNode.data?.raw && Object.entries(selectedNode.data.raw).map(([k, v]) => (
+                      <div key={k} className="space-y-0.5">
+                        <div className="text-zinc-500">{k}</div>
+                        <div className="font-mono text-zinc-300 break-all">
+                          {Array.isArray(v) ? v.join(', ') || '—' : String(v ?? '—')}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* ── Table view ── */}
+          {results?.type === 'table' && (
             <div className="card p-0 overflow-hidden">
               <div className="px-4 py-2 border-b border-surface-border flex items-center justify-between">
                 <span className="text-xs text-zinc-500">{results.count} row{results.count !== 1 ? 's' : ''}</span>
