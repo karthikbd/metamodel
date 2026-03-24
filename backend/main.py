@@ -61,6 +61,17 @@ def health():
     }
 
 
+@app.get("/api/config")
+def get_config():
+    """Return safe (non-secret) runtime configuration for the frontend."""
+    return {
+        "neo4j_uri":       active_uri() or settings.neo4j_uri,
+        "repo_scan_root":  settings.repo_scan_root,
+        "llm_enabled":     bool(settings.openai_api_key),
+        "neo4j_connected": bool(active_uri()),
+    }
+
+
 @app.post("/api/shutdown")
 def shutdown():
     os.kill(os.getpid(), signal.SIGTERM)
