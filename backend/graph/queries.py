@@ -427,7 +427,7 @@ async def get_stm_full_lineage() -> list:
 # ---------------------------------------------------------------------------
 
 async def get_all_job_graph() -> dict:
-    """All Job/Dataset/BusinessRule nodes and every READS_FROM/WRITES_TO/DEPENDS_ON/GOVERNED_BY edge."""
+    """All Job/Dataset/BusinessRule nodes + all relationship types including FK dataset joins."""
     nodes = await run_query("""
         MATCH (n) WHERE n:Job OR n:Dataset OR n:BusinessRule
         RETURN n.id AS id, n.name AS name, labels(n)[0] AS type,
@@ -435,10 +435,13 @@ async def get_all_job_graph() -> dict:
                coalesce(n.risk_tags, [])       AS risk_tags
     """)
     edges = await run_query("""
-        MATCH (a:Job)-[r:READS_FROM|WRITES_TO|DEPENDS_ON|GOVERNED_BY]->(b)
-        WHERE b:Job OR b:Dataset OR b:BusinessRule
+        MATCH (a)-[r:READS_FROM|WRITES_TO|DEPENDS_ON|GOVERNED_BY|REFERENCES|DERIVED_FROM|JOINS_WITH]->(b)
+        WHERE (a:Job OR a:Dataset) AND (b:Job OR b:Dataset OR b:BusinessRule)
         RETURN a.id AS src, b.id AS tgt, type(r) AS rel
     """)
+    if not nodes and not edges:
+        from graph import mock_data as _mock  # lazy import — avoids circular at module level
+        return _mock.get_all_job_graph_mock()
     return {"nodes": nodes, "edges": edges}
 
 

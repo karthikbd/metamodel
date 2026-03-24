@@ -22,6 +22,8 @@ const EDGE_COLORS = {
   DEPENDS_ON:   '#a78bfa',
   GOVERNED_BY:  '#34d399',
   DERIVED_FROM: '#f472b6',
+  REFERENCES:   '#fb923c',
+  JOINS_WITH:   '#38bdf8',
 }
 
 const MONO = 'JetBrains Mono, monospace'
