@@ -72,6 +72,9 @@ export const fetchDatasets = (name) =>
 export const fetchColumns = (dataset) =>
   api.get('/api/graph/columns', { params: dataset ? { dataset } : {} }).then(r => r.data)
 
+export const seedMockGraph = () =>
+  api.post('/api/graph/seed-mock').then(r => r.data)
+
 export const fetchJobReads     = (id) => api.get(`/api/graph/job/${id}/reads`).then(r => r.data)
 export const fetchJobWrites    = (id) => api.get(`/api/graph/job/${id}/writes`).then(r => r.data)
 export const fetchJobDataflows = (id) => api.get(`/api/graph/job/${id}/dataflows`).then(r => r.data)

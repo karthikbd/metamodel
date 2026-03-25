@@ -13,6 +13,9 @@ const SAMPLE_QUERIES = [
   { label: 'Job dependencies',       q: 'MATCH (a:Job)-[r:DEPENDS_ON]->(b:Job) RETURN a.name AS caller, b.name AS callee LIMIT 25' },
   { label: 'Business rules',         q: 'MATCH (j:Job)-[:GOVERNED_BY]->(b:BusinessRule) RETURN j.name, b.name, b.description LIMIT 25' },
   { label: 'Deprecated columns',     q: "MATCH (c:Column {status:'deprecated'}) RETURN c.name, c.deprecated_at LIMIT 25" },
+  { label: 'Column lineage graph',    q: 'MATCH (src:Column)-[r:DERIVED_FROM]->(tgt:Column) RETURN src, r, tgt LIMIT 100' },
+  { label: 'Schema (Dataset→Column)', q: 'MATCH (d:Dataset)-[r:HAS_COLUMN]->(c:Column)\nOPTIONAL MATCH (c)-[df:DERIVED_FROM]->(src:Column)\nRETURN d, r, c, df, src LIMIT 300' },
+  { label: 'Column lineage (Dataset bridge)', q: 'MATCH (d1:Dataset)-[:HAS_COLUMN]->(c1:Column)-[df:DERIVED_FROM]->(c2:Column)<-[:HAS_COLUMN]-(d2:Dataset)\nRETURN d1, c1, df, c2, d2 LIMIT 200' },
 ]
 
 function CellValue({ v }) {

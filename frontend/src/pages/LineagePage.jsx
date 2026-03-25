@@ -2,63 +2,63 @@
 import { GitBranch, Database, Network } from 'lucide-react'
 import ColumnLineageTab from './ColumnLineageTab'
 import FunctionalLineageTab from './FunctionalLineageTab'
-import BloomGraph from '../components/BloomGraph'
+import InformaticaLineage from '../components/InformaticaLineage'
+import ColumnLineageFlow from '../components/ColumnLineageFlow'
+import FunctionalLineageFlow from '../components/FunctionalLineageFlow'
+import { seedMockGraph } from '../services/api'
 
-// ─── Node badge style helper ─────────────────────────────────────────────────
-
-const NODE_BADGE = {
-  Job:     { color: '#a78bfa', borderColor: '#7c3aed', background: '#1e1529' },
-  Dataset: { color: '#93c5fd', borderColor: '#3b82f6', background: '#0f1a2e' },
-}
-function nodeBadgeStyle(type) {
-  return NODE_BADGE[type] || { color: '#6ee7b7', borderColor: '#34d399', background: '#0e1e18' }
-}
-
-// ─── Cypher queries per edge-mode ────────────────────────────────────────────
-
-const CYPHER = {
-  all:     'MATCH (n)-[r:READS_FROM|WRITES_TO|DEPENDS_ON|GOVERNED_BY|REFERENCES|DERIVED_FROM|JOINS_WITH]->(m) RETURN n, r, m LIMIT 120',
-  process: 'MATCH (a:Job)-[r:DEPENDS_ON]->(b:Job) RETURN a, r, b LIMIT 100',
-  data:    'MATCH (j:Job)-[r:READS_FROM|WRITES_TO]->(d:Dataset) RETURN j, r, d LIMIT 100',
-  fk:      'MATCH (a:Dataset)-[r:REFERENCES|DERIVED_FROM|JOINS_WITH]->(b:Dataset) RETURN a, r, b LIMIT 100',
-}
-
-// ─── Job Lineage Tab ──────────────────────────────────────────────────────────
+// ─── Job Lineage Tab ───────────────────────────────────────────────────────────
 
 function JobLineageTab() {
-  const [edgeMode, setEdgeMode] = useState('all')
+  const [seeding, setSeeding] = useState(false)
+  const [seedMsg, setSeedMsg] = useState(null)
+
+  const handleSeed = async () => {
+    setSeeding(true)
+    setSeedMsg(null)
+    try {
+      const r = await seedMockGraph()
+      const s = r.seeded || {}
+      setSeedMsg(`✓ Seeded: ${s.datasets ?? 0} datasets, ${s.jobs ?? 0} jobs, ${s.columns ?? 0} columns, ${s.col_edges ?? 0} col edges`)
+    } catch (err) {
+      setSeedMsg(`✗ Seed failed: ${err?.response?.data?.detail || err.message}`)
+    } finally {
+      setSeeding(false)
+    }
+  }
 
   return (
     <div className="space-y-3 flex flex-col flex-1">
 
       {/* ── Controls ── */}
       <div className="flex flex-wrap gap-2 items-center">
-        <div className="flex gap-1 bg-surface border border-surface-border rounded-lg p-0.5">
-          {[
-            { key: 'all',     label: 'All edges' },
-            { key: 'process', label: 'Job → Job (DEPENDS_ON)' },
-            { key: 'data',    label: 'Job ↔ Dataset' },
-            { key: 'fk',      label: 'Dataset FK / Joins' },
-          ].map(({ key, label }) => (
-            <button
-              key={key}
-              onClick={() => setEdgeMode(key)}
-              className={`px-3 py-1 rounded-md text-xs font-medium transition-colors ${
-                edgeMode === key ? 'bg-accent text-white' : 'text-zinc-400 hover:text-zinc-200'
-              }`}
-            >
-              {label}
-            </button>
-          ))}
-        </div>
+        <button
+          onClick={handleSeed}
+          disabled={seeding}
+          className="px-3 py-1 rounded-md text-xs font-medium border border-emerald-700 text-emerald-400 hover:bg-emerald-900/20 disabled:opacity-40 transition-colors"
+        >
+          {seeding ? 'Seeding…' : 'Seed AuraDB'}
+        </button>
         <span className="text-xs text-zinc-600 ml-auto">
           Drag · scroll to zoom · hover for details &nbsp;·&nbsp;
           <span className="text-zinc-700">powered by NeoVis → AuraDB</span>
         </span>
       </div>
 
-      {/* ── NeoVis graph (connects directly to AuraDB) ── */}
-      <BloomGraph cypher={CYPHER[edgeMode]} height={600} />
+      {seedMsg && (
+        <p className={`text-xs px-3 py-1.5 rounded border ${
+          seedMsg.startsWith('✓')
+            ? 'text-emerald-400 border-emerald-800 bg-emerald-900/20'
+            : 'text-red-400 border-red-800 bg-red-900/20'
+        }`}>{seedMsg}</p>
+      )}
+
+      {/* ── Informatica-style lineage DAG ── */}
+      <div className="text-[10px] text-zinc-600 font-mono">
+        Sources → Ingest Jobs → Core Tables → Transforms → Derived Tables → Orchestration → Outputs → Reports
+        &nbsp;·&nbsp;click a node to inspect · use filter buttons inside to focus a domain
+      </div>
+      <InformaticaLineage />
 
     </div>
   )
@@ -114,8 +114,26 @@ export default function LineagePage() {
 
       {/* Tab content */}
       {tab === 'job'        && <JobLineageTab />}
-      {tab === 'column'     && <ColumnLineageTab />}
-      {tab === 'functional' && <FunctionalLineageTab />}
+      {tab === 'column'     && (
+        <div className="space-y-2 flex flex-col flex-1">
+          <div className="text-[10px] text-zinc-600 font-mono">
+            Dataset containers show their columns ·
+            pink arrows = DERIVED_FROM (column-level) ·
+            click a column to trace its full upstream / downstream chain
+          </div>
+          <ColumnLineageFlow />
+        </div>
+      )}
+      {tab === 'functional' && (
+        <div className="space-y-2 flex flex-col flex-1">
+          <div className="text-[10px] text-zinc-600 font-mono">
+            DEPENDS_ON job call-chain ·
+            tier 0 = root callers → right = leaf callees ·
+            click a job to highlight its dependency path
+          </div>
+          <FunctionalLineageFlow />
+        </div>
+      )}
     </div>
   )
 }

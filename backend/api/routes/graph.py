@@ -1,8 +1,11 @@
+import uuid
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
+from neo4j.graph import Node, Relationship
 from graph import queries
 from graph import mock_data as _mock
-from graph.neo4j_client import run_query
+from graph.neo4j_client import run_query, get_driver, _session_kwargs
+from graph.writer import write_columns_batch, write_rels_batch, write_datasets_batch, write_jobs_batch
 
 router = APIRouter()
 
@@ -10,6 +13,25 @@ router = APIRouter()
 class CypherRequest(BaseModel):
     cypher: str
     params: dict | None = None
+
+
+def _serialize_val(v):
+    """Recursively convert any value to JSON-safe primitives.
+    Neo4j temporal types (DateTime, Date, Duration, etc.) become ISO strings."""
+    if isinstance(v, (str, int, float, bool, type(None))):
+        return v
+    if isinstance(v, list):
+        return [_serialize_val(i) for i in v]
+    if isinstance(v, dict):
+        return {k: _serialize_val(vv) for k, vv in v.items()}
+    # Catch-all: neo4j temporal / spatial types, unknown objects → isoformat or str
+    if hasattr(v, 'isoformat'):
+        return v.isoformat()
+    return str(v)
+
+
+def _serialize_props(props: dict) -> dict:
+    return {k: _serialize_val(v) for k, v in props.items()}
 
 
 # ── Private helpers (keep route handlers' cyclomatic complexity low) ──────
@@ -66,6 +88,64 @@ async def run_cypher(req: CypherRequest):
     try:
         rows = await queries.run_raw_cypher(req.cypher, req.params)
         return {"rows": rows, "count": len(rows)}
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.post("/vis-query")
+async def vis_query_for_network(req: CypherRequest):
+    """Execute Cypher and return { nodes, edges } for direct vis-network rendering.
+
+    Each node:  { id, label, labels, props }
+    Each edge:  { id, from, to, type, props }
+    """
+    try:
+        driver = await get_driver()
+        async with driver.session(**_session_kwargs()) as session:
+            result = await session.run(req.cypher, req.params or {})
+            records = [r async for r in result]
+
+        nodes_map: dict[str, dict] = {}
+        edges_list: list[dict] = []
+        edge_ids: set[str] = set()
+
+        for rec in records:
+            for key in rec.keys():
+                val = rec[key]
+                if isinstance(val, Node):
+                    nid = val.element_id
+                    if nid not in nodes_map:
+                        lbls = list(val.labels)
+                        nodes_map[nid] = {
+                            "id":     nid,
+                            "label":  lbls[0] if lbls else "Node",
+                            "labels": lbls,
+                            "props":  _serialize_props(dict(val)),
+                        }
+                elif isinstance(val, Relationship):
+                    eid = val.element_id
+                    if eid not in edge_ids:
+                        edge_ids.add(eid)
+                        # Ensure start/end nodes are in the map too
+                        for n in (val.start_node, val.end_node):
+                            nid = n.element_id
+                            if nid not in nodes_map:
+                                lbls = list(n.labels)
+                                nodes_map[nid] = {
+                                    "id":     nid,
+                                    "label":  lbls[0] if lbls else "Node",
+                                    "labels": lbls,
+                                    "props":  _serialize_props(dict(n)),
+                                }
+                        edges_list.append({
+                            "id":    eid,
+                            "from":  val.start_node.element_id,
+                            "to":    val.end_node.element_id,
+                            "type":  val.type,
+                            "props": _serialize_props(dict(val)),
+                        })
+
+        return {"nodes": list(nodes_map.values()), "edges": edges_list}
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
@@ -211,6 +291,130 @@ def _to_visual(rows: list[dict]) -> dict:
         _build_from_scalars(scalar_rows, node_map, edge_list)
 
     return {"nodes": list(node_map.values()), "edges": edge_list}
+
+
+@router.post("/seed-mock")
+async def seed_mock_graph():
+    """
+    Write ALL mock data (Datasets, Jobs, Job edges, Dataset FK joins,
+    Column nodes + HAS_COLUMN edges, Column DERIVED_FROM edges) into AuraDB.
+    Safe to call multiple times — every write is a MERGE (idempotent).
+    """
+    run_id = f"seed-mock-{uuid.uuid4().hex[:8]}"
+    errors: list[str] = []
+    columns_flat = await _seed_columns(run_id, errors)
+    col_pairs    = await _seed_col_edges(errors)
+    await _seed_datasets(run_id, errors)
+    await _seed_jobs(run_id, errors)
+    await _seed_job_edges(errors)
+    await _seed_dataset_joins(errors)
+    return {
+        "status": "partial" if errors else "ok",
+        "run_id": run_id,
+        "seeded": {
+            "datasets":      len(_mock.DATASETS),
+            "jobs":          len(_mock.JOBS),
+            "columns":       len(columns_flat),
+            "col_edges":     len(col_pairs),
+            "job_edges":     len(_mock.JOB_EDGES),
+            "dataset_joins": len(_mock.DATASET_JOINS),
+        },
+        "errors": errors,
+    }
+
+
+# ── Seed helpers (one logical step each, extracted to keep CCN low) ────────
+
+async def _seed_datasets(run_id: str, errors: list) -> None:
+    try:
+        await write_datasets_batch(_mock.DATASETS, run_id)
+    except Exception as exc:  # noqa: BLE001
+        errors.append(f"datasets: {exc}")
+
+
+async def _seed_jobs(run_id: str, errors: list) -> None:
+    try:
+        await write_jobs_batch(_mock.JOBS, run_id)
+    except Exception as exc:  # noqa: BLE001
+        errors.append(f"jobs: {exc}")
+
+
+async def _seed_columns(run_id: str, errors: list) -> list[dict]:
+    ds_name_to_id = {d["name"]: d["id"] for d in _mock.DATASETS}
+    columns_flat: list[dict] = []
+    for ds_name, cols in _mock.COLUMNS.items():
+        ds_id = ds_name_to_id.get(ds_name, "")
+        for c in cols:
+            columns_flat.append({
+                "id":             c["id"],
+                "name":           c["name"],
+                "qualified_name": f"{ds_name}.{c['name']}",
+                "dataset_id":     ds_id,
+                "data_type":      c["dtype"],
+                "pii_flag":       c.get("pii", False),
+                "sensitive_flag": c.get("pii", False),
+            })
+    try:
+        await write_columns_batch(columns_flat, run_id)
+    except Exception as exc:  # noqa: BLE001
+        errors.append(f"columns: {exc}")
+    return columns_flat
+
+
+async def _seed_col_edges(errors: list) -> list[dict]:
+    col_pairs = [
+        {"from_id": e["src"], "to_id": e["tgt"],
+         "confidence": e.get("confidence", "verified"),
+         "expression": e.get("expression", "")}
+        for e in _mock.COLUMN_EDGES
+    ]
+    try:
+        await write_rels_batch("Column", "DERIVED_FROM", "Column", col_pairs)
+    except Exception as exc:  # noqa: BLE001
+        errors.append(f"column_derived_from: {exc}")
+    return col_pairs
+
+
+async def _seed_job_edges(errors: list) -> None:
+    def _pairs(rel_name: str) -> list[dict]:
+        return [
+            {"from_id": e["src"], "to_id": e["tgt"],
+             "confidence": e.get("conf", "verified")}
+            for e in _mock.JOB_EDGES if e["rel"] == rel_name
+        ]
+    try:
+        reads  = _pairs("READS_FROM")
+        writes = _pairs("WRITES_TO")
+        deps   = _pairs("DEPENDS_ON")
+        if reads:
+            await write_rels_batch("Job", "READS_FROM", "Dataset", reads)
+        if writes:
+            await write_rels_batch("Job", "WRITES_TO",  "Dataset", writes)
+        if deps:
+            await write_rels_batch("Job", "DEPENDS_ON", "Job",     deps)
+    except Exception as exc:  # noqa: BLE001
+        errors.append(f"job_edges: {exc}")
+
+
+async def _seed_dataset_joins(errors: list) -> None:
+    def _join_pairs(rel_name: str) -> list[dict]:
+        return [
+            {"from_id": j["src"], "to_id": j["tgt"],
+             "join_key": j["join_key"], "join_type": j["join_type"]}
+            for j in _mock.DATASET_JOINS if j["rel"] == rel_name
+        ]
+    try:
+        refs    = _join_pairs("REFERENCES")
+        derived = _join_pairs("DERIVED_FROM")
+        joins   = _join_pairs("JOINS_WITH")
+        if refs:
+            await write_rels_batch("Dataset", "REFERENCES",  "Dataset", refs)
+        if derived:
+            await write_rels_batch("Dataset", "DERIVED_FROM", "Dataset", derived)
+        if joins:
+            await write_rels_batch("Dataset", "JOINS_WITH",  "Dataset", joins)
+    except Exception as exc:  # noqa: BLE001
+        errors.append(f"dataset_joins: {exc}")
 
 
 @router.post("/visual")

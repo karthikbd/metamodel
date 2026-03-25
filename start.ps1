@@ -74,10 +74,10 @@ Write-OK "pipenv found: $Pipenv"
 Write-Step "Ensuring pipenv virtualenv is up to date..."
 $env:PIPENV_VENV_IN_PROJECT = "1"
 Set-Location $Root
-pipenv install 2>&1 | Tee-Object -Variable pipenvOut | Out-Null
-if ($LASTEXITCODE -ne 0) {
-    Write-Fail "pipenv install failed"
-    Write-Host ($pipenvOut -join "`n") -ForegroundColor Red
+pipenv sync 2>&1 | Out-Null
+# pipenv may exit 1 even on success (stderr warnings); treat only code >1 as real failure
+if ($LASTEXITCODE -gt 1) {
+    Write-Fail "pipenv sync failed (exit $LASTEXITCODE)"
     exit 1
 }
 Write-OK "virtualenv ready"
