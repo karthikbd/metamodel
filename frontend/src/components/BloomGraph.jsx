@@ -101,51 +101,72 @@ function buildExpandCypher(name, type) {
   return `MATCH (n {name:'${safe}'})-[r]-(m) RETURN n, r, m LIMIT 80`
 }
 
-/** Call POST /api/graph/vis-query — returns { nodes, edges } or throws on error */
+/** Call POST /api/graph/vis-query — returns { nodes, edges, truncated } or throws on error.
+ *  A client-side AbortController enforces a 30 s hard timeout so the browser
+ *  never hangs indefinitely when the Neo4j query is slow or the backend stalls. */
 async function fetchVizData(cypher, params = {}) {
-  const res = await fetch('/api/graph/vis-query', {
-    method:  'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body:    JSON.stringify({ cypher, params }),
-  })
-  if (!res.ok) {
-    const detail = await res.json().catch(() => ({}))
-    throw new Error(detail?.detail || `HTTP ${res.status}`)
+  const ctrl = new AbortController()
+  const tid  = setTimeout(() => ctrl.abort(), 30_000)
+  try {
+    const res = await fetch('/api/graph/vis-query', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ cypher, params }),
+      signal:  ctrl.signal,
+    })
+    if (!res.ok) {
+      const detail = await res.json().catch(() => ({}))
+      throw new Error(detail?.detail || `HTTP ${res.status}`)
+    }
+    return res.json()
+  } catch (err) {
+    if (err.name === 'AbortError')
+      throw new Error('Query timed out after 30 s — try a more specific query or add LIMIT')
+    throw err
+  } finally {
+    clearTimeout(tid)
   }
-  return res.json()
 }
 
-/** vis-network global options */
-const VIS_OPTIONS = {
-  nodes: {
-    shape: 'dot', size: 22, borderWidth: 2,
-    font:  { color: '#e4e4e7', size: 13, face: 'JetBrains Mono, monospace' },
-  },
-  edges: {
-    arrows: { to: { enabled: true, scaleFactor: 0.6 } },
-    smooth: { type: 'dynamic' },
-    width:  1.5,
-    font:   { color: '#71717a', size: 10, face: 'JetBrains Mono, monospace', align: 'middle' },
-  },
-  physics: {
-    enabled: true,
-    solver:  'forceAtlas2Based',
-    forceAtlas2Based: {
-      gravitationalConstant: -50,
-      centralGravity:        0.01,
-      springLength:          130,
-      springConstant:        0.08,
+/** Build vis-network options with adaptive stabilization iterations.
+ *  Scales iterations with graph size so large graphs don't freeze the browser:
+ *    0–20 nodes  → ~40 iterations  (instant)
+ *    50 nodes    → 100 iterations
+ *    100+ nodes  → capped at 200 iterations
+ */
+function buildVisOptions(nodeCount = 0) {
+  const iterations = Math.min(200, Math.max(40, nodeCount * 2))
+  return {
+    nodes: {
+      shape: 'dot', size: 22, borderWidth: 2,
+      font:  { color: '#e4e4e7', size: 13, face: 'JetBrains Mono, monospace' },
     },
-    stabilization: { iterations: 200, updateInterval: 25 },
-  },
-  interaction: {
-    hover:                true,
-    tooltipDelay:         300,
-    navigationButtons:    true,
-    keyboard:             true,
-    multiselect:          true,
-    selectConnectedEdges: true,
-  },
+    edges: {
+      arrows: { to: { enabled: true, scaleFactor: 0.6 } },
+      smooth: { type: 'dynamic' },
+      width:  1.5,
+      font:   { color: '#71717a', size: 10, face: 'JetBrains Mono, monospace', align: 'middle' },
+    },
+    physics: {
+      enabled: true,
+      solver:  'forceAtlas2Based',
+      forceAtlas2Based: {
+        gravitationalConstant: -50,
+        centralGravity:        0.01,
+        springLength:          130,
+        springConstant:        0.08,
+      },
+      stabilization: { iterations, updateInterval: 25 },
+    },
+    interaction: {
+      hover:                true,
+      tooltipDelay:         300,
+      navigationButtons:    true,
+      keyboard:             true,
+      multiselect:          true,
+      selectConnectedEdges: true,
+    },
+  }
 }
 
 //  component 
@@ -168,12 +189,14 @@ function deriveModeFromCypher(cypher) {
 
 let _instanceCounter = 0
 
-export default function NeoVisGraph({ cypher, height = 560, onStable }) {
-  const idRef      = useRef(`bloom-${++_instanceCounter}`)
-  const networkRef = useRef(null)
-  const nodeDSRef  = useRef(null)
-  const edgeDSRef  = useRef(null)
-  const cancelRef  = useRef(false)
+export default function NeoVisGraph({ cypher, graphData, rowCount = 0, height = 560, onStable }) {
+  const idRef               = useRef(`bloom-${++_instanceCounter}`)
+  const networkRef          = useRef(null)
+  const nodeDSRef           = useRef(null)
+  const edgeDSRef           = useRef(null)
+  const cancelRef           = useRef(false)
+  const pendingGraphDataRef = useRef(null)   // stores graphData that arrived before init() finished
+  const externalCypherRef   = useRef(null)   // cypher whose result was supplied via graphData prop — skip own fetch
 
   const [status,       setStatus]       = useState('loading')
   const [msg,          setMsg]          = useState('')
@@ -181,6 +204,7 @@ export default function NeoVisGraph({ cypher, height = 560, onStable }) {
   const [history,      setHistory]      = useState([])
   const [activeCypher, setActiveCypher] = useState(cypher)
   const [useMock,      setUseMock]      = useState(false)
+  const [truncated,    setTruncated]    = useState(false)
 
   // Sync activeCypher when parent changes the cypher prop
   useEffect(() => {
@@ -188,6 +212,46 @@ export default function NeoVisGraph({ cypher, height = 560, onStable }) {
     setHistory([])
     setSelected(null)
   }, [cypher])
+
+  // Helper: pump a vis-query result { nodes, edges, truncated } into the live network
+  const applyVisData = useCallback((gd) => {
+    if (!networkRef.current || !nodeDSRef.current || !edgeDSRef.current) return
+    setStatus('loading')
+    setSelected(null)
+    setTruncated(gd.truncated || false)
+    nodeDSRef.current.clear()
+    edgeDSRef.current.clear()
+    nodeDSRef.current.add(gd.nodes.map(buildVisNode))
+    edgeDSRef.current.add(gd.edges.map(buildVisEdge))
+    networkRef.current.setOptions(buildVisOptions(gd.nodes.length))
+    if (gd.nodes.length === 0) {
+      setStatus('empty')
+      if (onStable) onStable()
+    } else {
+      networkRef.current.startSimulation()
+      networkRef.current.once('stabilizationIterationsDone', () => {
+        if (cancelRef.current) return
+        networkRef.current?.fit()
+        setStatus('ready')
+        if (onStable) onStable()
+      })
+    }
+  }, [onStable]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  //  0. When parent provides pre-loaded graph data (from GraphPage executeQuery), apply
+  //     it directly so the graph and table are always driven by the same single execution.
+  useEffect(() => {
+    if (!graphData) return
+    // Record which cypher this data covers so the activeCypher effect can skip refetching
+    externalCypherRef.current = cypher
+    if (!networkRef.current || !nodeDSRef.current || !edgeDSRef.current) {
+      // vis-network not initialised yet — save for init() to pick up after setup
+      pendingGraphDataRef.current = graphData
+      return
+    }
+    pendingGraphDataRef.current = null
+    applyVisData(graphData)
+  }, [graphData, applyVisData]) // eslint-disable-line react-hooks/exhaustive-deps
 
   //  1. Mount vis-network once on component mount 
   useEffect(() => {
@@ -206,35 +270,30 @@ export default function NeoVisGraph({ cypher, height = 560, onStable }) {
       ])
       if (cancelRef.current) return
 
-      // Fetch initial graph from the backend
-      const initCypher = cypher || 'MATCH (n)-[r]->(m) RETURN n, r, m LIMIT 80'
-      let data
-      try {
-        data = await fetchVizData(initCypher)
-      } catch (err) {
-        if (!cancelRef.current) { setStatus('error'); setMsg(err.message) }
-        return
-      }
-      if (cancelRef.current) return
+      // If graphData was provided by the parent before init completed, use it directly.
+      // Otherwise initialise an empty network and wait for the user to click Run.
+      const pending = pendingGraphDataRef.current
+      pendingGraphDataRef.current = null
 
-      const nodeDS = new visData.DataSet(data.nodes.map(buildVisNode))
-      const edgeDS = new visData.DataSet(data.edges.map(buildVisEdge))
+      // Always create the vis-network so applyVisData() can update it later.
+      const initialNodes = pending ? pending.nodes.map(buildVisNode) : []
+      const initialEdges = pending ? pending.edges.map(buildVisEdge) : []
+
+      const nodeDS = new visData.DataSet(initialNodes)
+      const edgeDS = new visData.DataSet(initialEdges)
       nodeDSRef.current = nodeDS
       edgeDSRef.current = edgeDS
 
       const container = document.getElementById(idRef.current)
       if (!container || cancelRef.current) return
 
-      const net = new visNet.Network(container, { nodes: nodeDS, edges: edgeDS }, VIS_OPTIONS)
+      const nodeCount = initialNodes.length
+      const net = new visNet.Network(container, { nodes: nodeDS, edges: edgeDS }, buildVisOptions(nodeCount))
       networkRef.current = net
 
-      net.once('stabilizationIterationsDone', () => {
-        if (cancelRef.current) return
-        net.fit()
-        setStatus('ready')
-        if (onStable) onStable()
-      })
-
+      // Always register interaction handlers regardless of whether we have initial data.
+      // Without this, clicking/expanding never works when the graph starts idle and data
+      // is applied later via applyVisData().
       net.on('click', params => {
         if (cancelRef.current) return
         if (params.nodes.length === 0) { setSelected(null); net.unselectAll(); return }
@@ -252,6 +311,30 @@ export default function NeoVisGraph({ cypher, height = 560, onStable }) {
           animation: { duration: 500, easingFunction: 'easeInOutQuad' },
         })
       })
+
+      if (!pending) {
+        // No data yet — sit idle until the user clicks Run
+        setStatus('idle')
+        return
+      }
+
+      if (pending.truncated) setTruncated(true)
+
+      if (cancelRef.current) return
+
+      // vis-network never emits stabilizationIterationsDone on an empty graph,
+      // so we manually resolve the loading state when there are no nodes.
+      if (nodeCount === 0) {
+        setStatus('empty')
+        if (onStable) onStable()
+      } else {
+        net.once('stabilizationIterationsDone', () => {
+          if (cancelRef.current) return
+          net.fit()
+          setStatus('ready')
+          if (onStable) onStable()
+        })
+      }
     }
 
     init().catch(err => {
@@ -272,6 +355,13 @@ export default function NeoVisGraph({ cypher, height = 560, onStable }) {
     if (!networkRef.current || !nodeDSRef.current || !edgeDSRef.current) return
     if (!activeCypher) return
 
+    // If the parent already supplied fresh graphData for this exact cypher, skip
+    // the redundant self-fetch — the graphData useEffect already applied it.
+    if (externalCypherRef.current === activeCypher) {
+      externalCypherRef.current = null  // consume the token
+      return
+    }
+
     setStatus('loading')
     setSelected(null)
 
@@ -282,11 +372,17 @@ export default function NeoVisGraph({ cypher, height = 560, onStable }) {
         edgeDSRef.current.clear()
         nodeDSRef.current.add(data.nodes.map(buildVisNode))
         edgeDSRef.current.add(data.edges.map(buildVisEdge))
-        networkRef.current.startSimulation()
-        networkRef.current.once('stabilizationIterationsDone', () => {
-          networkRef.current?.fit()
-          setStatus('ready')
-        })
+        setTruncated(data.truncated || false)
+        networkRef.current.setOptions(buildVisOptions(data.nodes.length))
+        if (data.nodes.length === 0) {
+          setStatus('empty')
+        } else {
+          networkRef.current.startSimulation()
+          networkRef.current.once('stabilizationIterationsDone', () => {
+            networkRef.current?.fit()
+            setStatus('ready')
+          })
+        }
       })
       .catch(err => {
         if (!cancelRef.current) { setStatus('error'); setMsg(err.message) }
@@ -313,7 +409,16 @@ export default function NeoVisGraph({ cypher, height = 560, onStable }) {
 
   //  render 
   if (useMock) {
-    return <MockGraph mode={deriveModeFromCypher(activeCypher)} height={height} />
+    return (
+      <div className="relative">
+        <div className="absolute top-2 left-1/2 -translate-x-1/2 z-20 flex items-center gap-1.5
+                        px-3 py-1 rounded-full bg-zinc-800/90 border border-zinc-600/50
+                        text-zinc-400 text-[10px] pointer-events-none whitespace-nowrap">
+          ⚠️ Offline demo — backend / Neo4j unreachable. Sample data shown. Run the pipeline to see real results.
+        </div>
+        <MockGraph mode={deriveModeFromCypher(activeCypher)} height={height} />
+      </div>
+    )
   }
 
   return (
@@ -323,9 +428,38 @@ export default function NeoVisGraph({ cypher, height = 560, onStable }) {
       {/*  Canvas  */}
       <div className="relative flex-1 min-w-0">
 
+        {status === 'idle' && (
+          <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 z-10 pointer-events-none">
+            <p className="text-sm text-zinc-500 font-medium">Run a query to see the graph</p>
+            <p className="text-xs text-zinc-700">Type or select a Cypher query above, then click Run</p>
+          </div>
+        )}
         {status === 'loading' && (
           <div className="absolute inset-0 flex items-center justify-center z-10 pointer-events-none">
             <span className="text-sm text-zinc-600 animate-pulse">Loading graph from backend…</span>
+          </div>
+        )}
+        {status === 'empty' && (
+          <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 z-10 pointer-events-none">
+            {rowCount > 0 ? (
+              <>
+                <p className="text-sm text-amber-400 font-medium">Query returned {rowCount} rows but no graph nodes</p>
+                <p className="text-xs text-zinc-500 text-center max-w-sm">
+                  The graph needs full node/relationship variables.<br />
+                  Use <code className="bg-zinc-800 px-1 rounded">RETURN n</code> instead of{' '}
+                  <code className="bg-zinc-800 px-1 rounded">RETURN n.name</code> —
+                  check the Table tab to see your results.
+                </p>
+              </>
+            ) : (
+              <>
+                <p className="text-sm text-zinc-500 font-medium">No graph data for this query</p>
+                <p className="text-xs text-zinc-700 text-center max-w-xs">
+                  The query returned 0 nodes. Verify your AuraDB has data for this label/relationship,
+                  or run the pipeline to seed the graph.
+                </p>
+              </>
+            )}
           </div>
         )}
         {status === 'error' && (
@@ -333,6 +467,15 @@ export default function NeoVisGraph({ cypher, height = 560, onStable }) {
             <p className="text-sm text-red-400 font-medium">Graph query failed</p>
             <p className="text-xs text-zinc-600 font-mono max-w-xs text-center">{msg}</p>
             <p className="text-xs text-zinc-700">Check backend logs or <code>.env</code> credentials</p>
+          </div>
+        )}
+
+        {/* Truncation warning — shown when backend capped the result */}
+        {status === 'ready' && truncated && (
+          <div className="absolute top-2 left-1/2 -translate-x-1/2 z-20 flex items-center gap-1.5
+                          px-3 py-1 rounded-full bg-amber-950/80 border border-amber-600/50
+                          text-amber-300 text-[10px] pointer-events-none whitespace-nowrap">
+            ⚠&nbsp;Result capped — graph shows a subset of the full result (add LIMIT for finer control)
           </div>
         )}
 

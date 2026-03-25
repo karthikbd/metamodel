@@ -1,26 +1,51 @@
 import { useState, useEffect } from 'react'
-import { ShieldAlert, Play } from 'lucide-react'
+import { ShieldAlert, Play, CheckCircle2, AlertTriangle } from 'lucide-react'
 import { fetchComplianceQueries, runComplianceQuery } from '../services/api'
 import toast from 'react-hot-toast'
 
 const QUERY_META = {
   pii_without_audit: {
-    desc:  'Functions writing to PII-classified columns without an audit decorator.',
+    desc:  'Finds jobs tagged PII that are missing the audit_required control.',
     severity: 'high',
+    empty: 'No un-audited PII jobs found.',
+    action: 'Add audit coverage before allowing the job further downstream.',
   },
   regulatory_report_lineage: {
-    desc:  'All functions tagged regulatory_report and their source tables.',
+    desc:  'Shows regulatory-reporting jobs and the source datasets that feed them.',
     severity: 'medium',
+    empty: 'No regulatory-reporting lineage found.',
+    action: 'Verify that all report-producing jobs are tagged and linked to source datasets.',
   },
   deprecated_columns_in_use: {
-    desc:  'Functions still reading from DEPRECATED schema objects.',
+    desc:  'Finds jobs still reading deprecated columns that should be retired.',
     severity: 'medium',
+    empty: 'No deprecated columns are currently in use.',
+    action: 'Remove or migrate old column references before the next schema cleanup.',
   },
+}
+
+const COL_LABELS = {
+  job_id: 'Job ID',
+  job_name: 'Job',
+  name: 'Job',
+  path: 'File',
+  pii_columns: 'PII Columns',
+  pii_column_count: 'PII Count',
+  source_datasets: 'Source Datasets',
+  source_dataset_count: 'Source Count',
+  deprecated_column: 'Deprecated Column',
+  risk_tags: 'Risk Tags',
 }
 
 function SeverityBadge({ s }) {
   const cls = { high: 'badge-error', medium: 'badge-warn', low: 'badge-info' }
   return <span className={cls[s] || 'badge-info'}>{s}</span>
+}
+
+function StatusBadge({ count }) {
+  return count > 0
+    ? <span className="badge-error">{count} finding{count !== 1 ? 's' : ''}</span>
+    : <span className="badge-info">clear</span>
 }
 
 function ResultTable({ rows }) {
@@ -33,7 +58,7 @@ function ResultTable({ rows }) {
         <thead>
           <tr className="border-b border-surface-border">
             {cols.map(c => (
-              <th key={c} className="text-left px-3 py-2 font-normal text-zinc-500 font-mono">{c}</th>
+              <th key={c} className="text-left px-3 py-2 font-normal text-zinc-500 font-mono">{COL_LABELS[c] || c}</th>
             ))}
           </tr>
         </thead>
@@ -69,6 +94,12 @@ function QueryCard({ query, meta }) {
     }
   }
 
+  useEffect(() => {
+    run()
+    // Run once on mount so the tab is immediately useful.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
   return (
     <div className="card space-y-3">
       <div className="flex items-start justify-between gap-3">
@@ -81,6 +112,7 @@ function QueryCard({ query, meta }) {
         </div>
         <div className="flex items-center gap-2 flex-shrink-0">
           {meta?.severity && <SeverityBadge s={meta.severity} />}
+          {result && <StatusBadge count={result.count} />}
           <button
             onClick={run}
             disabled={loading}
@@ -92,7 +124,19 @@ function QueryCard({ query, meta }) {
       </div>
       {result && (
         <div className="border-t border-surface-border pt-3">
-          <p className="text-xs text-zinc-500 mb-2">{result.count} result{result.count !== 1 ? 's' : ''}</p>
+          <div className="flex items-start gap-2 text-xs mb-3">
+            {result.count > 0 ? (
+              <AlertTriangle size={14} className="text-amber-400 mt-0.5 flex-shrink-0" />
+            ) : (
+              <CheckCircle2 size={14} className="text-emerald-400 mt-0.5 flex-shrink-0" />
+            )}
+            <div className="text-zinc-400">
+              <p className="mb-1">
+                <span className="font-semibold text-zinc-200">{result.count}</span> result{result.count !== 1 ? 's' : ''}.
+                {' '}{result.count > 0 ? meta?.action : meta?.empty}
+              </p>
+            </div>
+          </div>
           <ResultTable rows={result.rows} />
         </div>
       )}
@@ -119,8 +163,23 @@ export default function CompliancePage() {
       <div>
         <h1 className="text-xl font-semibold text-zinc-100">Compliance Queries</h1>
         <p className="text-sm text-zinc-500 mt-0.5">
-          Regulatory and governance checks answered by single Cypher traversals
+          This tab explains whether your graph has governance gaps: missing audit coverage, report lineage, or deprecated schema still in use.
         </p>
+      </div>
+
+      <div className="grid md:grid-cols-3 gap-3">
+        <div className="card border-l-2 border-sky-500 text-sm text-zinc-300">
+          <p className="font-medium text-sky-300 mb-1">What it does</p>
+          <p>Runs three pre-built checks against the graph so you can spot control gaps without writing Cypher.</p>
+        </div>
+        <div className="card border-l-2 border-amber-500 text-sm text-zinc-300">
+          <p className="font-medium text-amber-300 mb-1">How to read it</p>
+          <p>If a card shows findings, that means some jobs or datasets need cleanup. Zero findings means that check is currently clear.</p>
+        </div>
+        <div className="card border-l-2 border-violet-500 text-sm text-zinc-300">
+          <p className="font-medium text-violet-300 mb-1">Why it matters</p>
+          <p>These checks are governance-focused. They support lineage work, but they are not the same thing as scheduler impact.</p>
+        </div>
       </div>
 
       <div className="card border-l-2 border-amber-500 text-xs text-zinc-400 space-y-1">

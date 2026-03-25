@@ -7,6 +7,7 @@ import functools
 import logging
 import time
 from datetime import datetime
+from utils.audit_log import emit_audit_event
 
 logger = logging.getLogger(__name__)
 
@@ -18,6 +19,12 @@ def pii_handler(func):
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
         logger.warning(f"[PII] Accessing PII in {func.__name__}")
+        emit_audit_event(
+            "pii_access",
+            module=func.__module__,
+            function=func.__name__,
+            status="STARTED",
+        )
         return func(*args, **kwargs)
     wrapper._is_pii = True
     return wrapper
@@ -29,11 +36,36 @@ def audit_required(func):
     """
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
+        emit_audit_event(
+            "function_execution",
+            module=func.__module__,
+            function=func.__name__,
+            status="STARTED",
+        )
         start = time.time()
-        result = func(*args, **kwargs)
-        elapsed = round(time.time() - start, 3)
-        logger.info(f"[AUDIT] {func.__name__} completed in {elapsed}s at {datetime.utcnow().isoformat()}")
-        return result
+        try:
+            result = func(*args, **kwargs)
+            elapsed = round(time.time() - start, 3)
+            logger.info(f"[AUDIT] {func.__name__} completed in {elapsed}s at {datetime.utcnow().isoformat()}")
+            emit_audit_event(
+                "function_execution",
+                module=func.__module__,
+                function=func.__name__,
+                status="SUCCESS",
+                duration_ms=int(elapsed * 1000),
+            )
+            return result
+        except Exception as exc:
+            elapsed = round(time.time() - start, 3)
+            emit_audit_event(
+                "function_execution",
+                module=func.__module__,
+                function=func.__name__,
+                status="FAILED",
+                duration_ms=int(elapsed * 1000),
+                metadata={"error": str(exc)},
+            )
+            raise
     wrapper._is_audited = True
     return wrapper
 
@@ -46,7 +78,37 @@ def regulatory_report(report_type: str = "GENERIC"):
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
             logger.info(f"[REGULATORY] Generating {report_type} report via {func.__name__}")
-            return func(*args, **kwargs)
+            emit_audit_event(
+                "regulatory_report",
+                module=func.__module__,
+                function=func.__name__,
+                status="STARTED",
+                metadata={"report_type": report_type},
+            )
+            start = time.time()
+            try:
+                result = func(*args, **kwargs)
+                elapsed = round(time.time() - start, 3)
+                emit_audit_event(
+                    "regulatory_report",
+                    module=func.__module__,
+                    function=func.__name__,
+                    status="SUCCESS",
+                    duration_ms=int(elapsed * 1000),
+                    metadata={"report_type": report_type},
+                )
+                return result
+            except Exception as exc:
+                elapsed = round(time.time() - start, 3)
+                emit_audit_event(
+                    "regulatory_report",
+                    module=func.__module__,
+                    function=func.__name__,
+                    status="FAILED",
+                    duration_ms=int(elapsed * 1000),
+                    metadata={"report_type": report_type, "error": str(exc)},
+                )
+                raise
         wrapper._regulatory_type = report_type
         return wrapper
     return decorator

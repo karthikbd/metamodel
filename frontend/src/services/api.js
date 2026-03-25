@@ -59,6 +59,10 @@ export const fetchAgentEvents = (runId, agentRunId) =>
 export const runCypher = (cypher, params) =>
   api.post('/api/graph/query', { cypher, params }).then(r => r.data)
 
+/** Execute Cypher via vis-query and return { nodes, edges, rows, count, truncated } */
+export const runVisQuery = (cypher, params) =>
+  api.post('/api/graph/vis-query', { cypher, params }).then(r => r.data)
+
 /** Execute Cypher and return ReactFlow-compatible {nodes, edges} for graph rendering. */
 export const runCypherVisual = (cypher, params) =>
   api.post('/api/graph/visual', { cypher, params }).then(r => r.data)

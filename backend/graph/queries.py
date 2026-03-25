@@ -247,24 +247,35 @@ async def get_all_functional_lineage_summary() -> list:
 async def pii_without_audit() -> list:
     return await run_query("""
         MATCH (j:Job)
-        WHERE 'PII' IN j.risk_tags
-          AND NOT 'audit_required' IN j.risk_tags
-        OPTIONAL MATCH (j)-[:READS_FROM|WRITES_TO]->(d:Dataset)
-        OPTIONAL MATCH (d)-[:HAS_COLUMN]->(c:Column {pii_flag: true})
-        RETURN j.id AS job_id, j.name AS job_name, j.domain AS path,
-               collect(DISTINCT d.name + '.' + c.name) AS pii_columns
-        ORDER BY j.name
+                WHERE 'PII' IN coalesce(j.risk_tags, [])
+                    AND NOT 'audit_required' IN coalesce(j.risk_tags, [])
+                OPTIONAL MATCH (j)-[:READS_FROM|WRITES_TO]->(d:Dataset)-[:HAS_COLUMN]->(c:Column {pii_flag: true})
+                WITH j,
+                         [item IN collect(DISTINCT CASE
+                                 WHEN d IS NOT NULL AND c IS NOT NULL THEN d.name + '.' + c.name
+                                 ELSE NULL
+                         END) WHERE item IS NOT NULL] AS pii_columns
+                RETURN j.id AS job_id,
+                             j.name AS job_name,
+                             coalesce(j.path, j.domain, '') AS path,
+                             pii_columns,
+                             size(pii_columns) AS pii_column_count
+                ORDER BY pii_column_count DESC, job_name
     """)
 
 
 async def regulatory_report_lineage() -> list:
     return await run_query("""
         MATCH (j:Job)
-        WHERE 'regulatory_report' IN j.risk_tags
+     WHERE 'regulatory_report' IN coalesce(j.risk_tags, [])
         OPTIONAL MATCH (j)-[:READS_FROM]->(d:Dataset)
-        RETURN j.id AS job_id, j.name AS name,
-               collect(DISTINCT d.name) AS source_datasets
-        ORDER BY j.name
+     WITH j, [name IN collect(DISTINCT d.name) WHERE name IS NOT NULL] AS source_datasets
+     RETURN j.id AS job_id,
+         j.name AS name,
+         coalesce(j.path, j.domain, '') AS path,
+         source_datasets,
+         size(source_datasets) AS source_dataset_count
+     ORDER BY source_dataset_count DESC, name
     """)
 
 
@@ -275,7 +286,9 @@ async def deprecated_columns_in_use() -> list:
             'old_amount', 'spot_rate_old', 'legacy_customer_id',
             'ssn_plain',  'credit_score_raw', 'amount_local_old'
         ]
-        RETURN j.name AS job_name, j.domain AS path,
+         RETURN j.name AS job_name,
+             coalesce(j.path, j.domain, '') AS path,
+             coalesce(j.risk_tags, []) AS risk_tags,
                d.name + '.' + c.name AS deprecated_column
         ORDER BY deprecated_column
     """)
@@ -290,10 +303,15 @@ async def column_impact(table: str, column: str) -> list:
         MATCH (d:Dataset {name: $tbl})-[:HAS_COLUMN]->(c:Column {name: $col})
         MATCH (j:Job)-[r:READS_FROM|WRITES_TO]->(d)
         OPTIONAL MATCH (caller:Job)-[:DEPENDS_ON]->(j)
-        RETURN j.id AS job_id, j.name AS name, j.domain AS path,
-               type(r) AS relationship,
-               collect(DISTINCT caller.name) AS callers,
-               j.risk_tags AS risk_tags
+        WITH j,
+             [rel IN collect(DISTINCT type(r)) WHERE rel IS NOT NULL] AS relationships,
+             [caller_name IN collect(DISTINCT caller.name) WHERE caller_name IS NOT NULL] AS callers
+        RETURN j.id AS job_id,
+               j.name AS name,
+               coalesce(j.path, j.domain, '') AS path,
+               relationships,
+               callers,
+               coalesce(j.risk_tags, []) AS risk_tags
         ORDER BY name
     """, {"tbl": table, "col": column})
 
@@ -301,11 +319,20 @@ async def column_impact(table: str, column: str) -> list:
 async def dataset_impact(dataset_name: str) -> list:
     return await run_query("""
         MATCH (d:Dataset {name: $ds})
-        OPTIONAL MATCH (reader:Job)-[:READS_FROM]->(d)
-        OPTIONAL MATCH (writer:Job)-[:WRITES_TO]->(d)
-        RETURN d.id AS dataset_id, d.name AS dataset_name,
-               collect(DISTINCT reader.name) AS read_by,
-               collect(DISTINCT writer.name) AS written_by
+     MATCH (j:Job)-[r:READS_FROM|WRITES_TO]->(d)
+     OPTIONAL MATCH (caller:Job)-[:DEPENDS_ON]->(j)
+     WITH d, j,
+          [rel IN collect(DISTINCT type(r)) WHERE rel IS NOT NULL] AS relationships,
+          [caller_name IN collect(DISTINCT caller.name) WHERE caller_name IS NOT NULL] AS callers
+     RETURN d.id AS dataset_id,
+         d.name AS dataset_name,
+         j.id AS job_id,
+         j.name AS name,
+         coalesce(j.path, j.domain, '') AS path,
+         relationships,
+         callers,
+         coalesce(j.risk_tags, []) AS risk_tags
+     ORDER BY name
     """, {"ds": dataset_name})
 
 

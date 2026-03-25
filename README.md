@@ -41,7 +41,7 @@ The graph is built on the **DataLineageMetaModel v3** schema. Every node and rel
 | `Alias` | An alternate name or mapping for a Dataset or Column |
 | `BusinessRule` | A governance rule a Job is subject to (e.g. PII audit required) |
 | `LLMSummary` | An AI-generated description of a Job or Dataset |
-| `PipelineRun` | A record of a hydration run (when, what, how many nodes written) |
+| `ScanRun` | A record of a hydration/seed run (when, what, how many nodes written) |
 
 ### Relationship Types
 
@@ -55,6 +55,32 @@ The graph is built on the **DataLineageMetaModel v3** schema. Every node and rel
 | `PART_OF` | Script is part of a Job hierarchy |
 | `GOVERNED_BY` | Job is subject to a BusinessRule |
 | `MAPS_TO` | Column is mapped to a target STM entry (Source-to-Target Mapping) |
+| `SCANNED` | ScanRun touched or produced the linked node during a scan/seed run |
+
+### Scheduler / Orchestration Lineage
+
+The sample repo now includes a realistic cross-module scheduler DAG in `sample_repo/scripts/job_scheduler.py`.
+That scheduler is represented in the graph as a separate set of `Job` nodes with `source = "scheduler"`.
+
+- Scheduler jobs are linked with `DEPENDS_ON` edges to show execution order.
+- Scheduler jobs also inherit `READS_FROM` / `WRITES_TO` dataset edges from their mapped core jobs.
+- This means the graph UI can render both orchestration order and data impact in one traversal.
+
+Example scheduler chain:
+
+```text
+customer_ingest
+  ↓
+kyc_refresh
+  ↓
+daily_aml_screening
+  ↓
+daily_risk_pipeline
+  ↙               ↘
+mis_daily_pack   ccar_annual_cycle
+  ↘               ↙
+    basel_pillar3
+```
 
 ---
 
@@ -140,15 +166,67 @@ Once STM is seeded, the full lineage from source file  source column  transforma
 
 ## Compliance & Governance Queries
 
-The graph supports pre-built compliance queries that run against real graph data:
+The graph supports pre-built compliance queries that run against real graph data.
+In the UI, the **Compliance** tab auto-runs these checks and shows a finding count, severity badge,
+and a short explanation of what action is usually required.
 
 | Query | Business Purpose |
 |---|---|
-| PII without audit | Jobs that handle PII-flagged columns but are not tagged `audit_required`  regulatory violation |
-| Regulatory report lineage | Full upstream lineage of every job tagged `regulatory_report` back to source datasets |
+| PII without audit | Jobs tagged `PII` but missing `audit_required`  governance gap |
+| Regulatory report lineage | Jobs tagged `regulatory_report` and the datasets that feed them |
 | Deprecated columns in use | Jobs still reading datasets that contain columns marked for deprecation |
-| Column impact | All jobs affected if a specific column is renamed or removed |
-| Dataset impact | All upstream and downstream jobs for a given dataset |
+
+The Compliance tab is **governance-focused**. It helps answer: “are we missing controls?” rather than “what breaks if I change this schema?”
+
+---
+
+## Impact Analysis & Scoring
+
+The **Impact** tab is designed for change planning.
+It answers: if a column or dataset changes, **which jobs are affected and how risky is that blast radius?**
+
+For every impacted job, the API now returns:
+
+- whether the job `READS_FROM` or `WRITES_TO` the selected object
+- immediate downstream callers (`DEPENDS_ON` fan-out)
+- risk tags such as `PII`, `audit_required`, and `regulatory_report`
+- a computed `impact_score`
+- an `impact_level` (`low`, `medium`, `high`, `critical`)
+
+The UI also shows a summary card set with:
+
+- affected job count
+- writers vs readers
+- downstream caller count
+- sensitive job count (PII / regulatory)
+- overall impact score
+
+### Impact score intuition
+
+The score is higher when:
+
+- a job **writes** the dataset/column instead of only reading it
+- more downstream jobs depend on it
+- the job carries sensitive tags like `PII` or `regulatory_report`
+
+A simplified scoring model is:
+
+$$
+	ext{score} =
+10 \cdot \text{writers} +
+6 \cdot \text{readers} +
+4 \cdot \text{downstream callers} +
+10 \cdot \text{PII jobs} +
+12 \cdot \text{regulatory jobs} +
+6 \cdot \text{audit-required jobs}
+$$
+
+The final score is capped at 100 and mapped to:
+
+- `low`: $0\text{–}14$
+- `medium`: $15\text{–}29$
+- `high`: $30\text{–}49$
+- `critical`: $50+$
 
 ---
 
@@ -244,8 +322,8 @@ meta_model/
         runs.py                  # GET  /api/runs  run history
         graph.py                 # POST /api/graph/query  raw Cypher
         lineage.py               # GET  /api/lineage/function/{id}
-        compliance.py            # Compliance queries (PII, regulatory, deprecated)
-        impact.py                # Column + dataset impact analysis
+      compliance.py            # Governance checks surfaced in the Compliance tab
+      impact.py                # Column + dataset impact analysis with scoring
         stats.py                 # GET  /api/stats  graph counts
         stm.py                   # Source-to-Target Mapping
         phase2.py                # Phase 2 pipeline field resolution
@@ -264,7 +342,10 @@ meta_model/
     risk/credit_risk.py            # Credit risk calculations
     risk/limit_monitor.py          # Limit breach monitoring
     risk/market_risk.py            # Market risk calculations
+    scripts/job_scheduler.py       # Cross-module scheduler DAG used for orchestration lineage
+    scripts/scan_audit_logs.py     # CLI scanner for structured audit logs
     utils/db_utils.py              # Shared DB utilities
+    utils/audit_log.py             # JSONL audit event writer
     utils/decorators.py            # Audit/PII decorators
  frontend/
      src/

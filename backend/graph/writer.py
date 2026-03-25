@@ -211,6 +211,7 @@ async def write_columns_batch(columns: list[dict], scan_run_id: str) -> None:
             "data_type": c.get("data_type", "unknown"),
             "pii_flag": c.get("pii_flag", False),
             "sensitive_flag": c.get("sensitive_flag", False),
+            "deprecated": c.get("deprecated", False),
             "confidence": VERIFIED,
             "scan_run_id": scan_run_id, "updated_at": now,
         }
@@ -222,11 +223,15 @@ async def write_columns_batch(columns: list[dict], scan_run_id: str) -> None:
         ON CREATE SET n.name = row.name, n.qualified_name = row.qualified_name,
                       n.dataset_id = row.dataset_id, n.data_type = row.data_type,
                       n.pii_flag = row.pii_flag, n.sensitive_flag = row.sensitive_flag,
+                      n.deprecated = row.deprecated,
                       n.confidence = row.confidence, n.scan_run_id = row.scan_run_id,
-                      n.created_at = row.updated_at, n.status = 'active'
+                      n.created_at = row.updated_at,
+                      n.status = CASE WHEN row.deprecated THEN 'deprecated' ELSE 'active' END
         ON MATCH  SET n.name = row.name, n.qualified_name = row.qualified_name,
+                      n.deprecated = row.deprecated,
                       n.scan_run_id = row.scan_run_id,
-                      n.updated_at = row.updated_at, n.status = 'active'
+                      n.updated_at = row.updated_at,
+                      n.status = CASE WHEN row.deprecated THEN 'deprecated' ELSE 'active' END
         WITH n, row WHERE row.dataset_id <> ''
         MATCH (d:Dataset {id: row.dataset_id})
         MERGE (d)-[:HAS_COLUMN]->(n)

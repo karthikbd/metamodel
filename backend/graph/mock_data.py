@@ -332,6 +332,17 @@ DEPRECATED_COLS = [
     {"job_name": "aml_screening_job",   "path": "sample_repo/compliance/aml_screening.py","deprecated_column": "market_data.spot_rate_old"},
 ]
 
+# ── Business Rules ────────────────────────────────────────────────────────
+
+BUSINESS_RULES = [
+    {"id": "br-001", "name": "PII_MASKING",       "description": "All PII fields must be masked before downstream reporting",             "category": "data_governance", "severity": "critical", "confidence": "verified", "job_id": "job-001"},
+    {"id": "br-002", "name": "AML_THRESHOLD",     "description": "Transactions above $10,000 must trigger AML screening",               "category": "compliance",      "severity": "critical", "confidence": "verified", "job_id": "job-008"},
+    {"id": "br-003", "name": "AUDIT_TRAIL",       "description": "All customer data mutations require an audit log entry",              "category": "compliance",      "severity": "high",     "confidence": "verified", "job_id": "job-001"},
+    {"id": "br-004", "name": "VAR_LIMIT_CHECK",   "description": "VaR must not exceed regulatory capital limit of 8% RWA",             "category": "risk",            "severity": "critical", "confidence": "verified", "job_id": "job-004"},
+    {"id": "br-005", "name": "KYC_REFRESH",       "description": "KYC records must be refreshed every 12 months per BSA/AML policy",  "category": "compliance",      "severity": "high",     "confidence": "verified", "job_id": "job-007"},
+    {"id": "br-006", "name": "CCAR_DATA_QUALITY", "description": "CCAR capital ratio inputs must pass data quality checks before submission", "category": "regulatory", "severity": "critical", "confidence": "verified", "job_id": "job-009"},
+]
+
 # ── Impact ─────────────────────────────────────────────────────────────────
 
 COLUMN_IMPACT = {
@@ -381,6 +392,46 @@ STM_MAPPINGS = [
     {"source_column_id": "col-001-04", "source_table": "customer_master",     "source_column": "ssn",             "source_dtype": "STRING",  "stm_id": "stm-007", "target_table": "dw_customers",      "target_column": "customer_token", "target_system": "data_warehouse", "owner": "data_engineering", "transform_expr": "hash(ssn)",                              "confidence": "verified", "used_by_jobs": ["customer_ingest"]},
     {"source_column_id": "col-010-05", "source_table": "aml_alerts",          "source_column": "aml_score",       "source_dtype": "DECIMAL", "stm_id": "stm-008", "target_table": "compliance_dw",     "target_column": "aml_risk_score", "target_system": "compliance_dw",  "owner": "compliance_team",  "transform_expr": "aml_score",                              "confidence": "verified", "used_by_jobs": ["aml_screening_job"]},
 ]
+
+# ── Scheduler DAG — nodes seeded directly from scripts/job_scheduler.py ────
+# Each entry becomes a Job node with source="scheduler" so the graph UI can
+# filter and render the orchestration lineage independently of the raw scripts.
+
+SCHEDULER_JOBS = [
+    {"id": "sched-001", "name": "customer_ingest",     "path": "sample_repo/scripts/job_scheduler.py", "domain": "ETL",        "type": "scheduled", "status": "active", "source": "scheduler", "module": "etl.customer_ingest",       "function": "run_customer_ingest",        "risk_tags": ["PII", "audit_required"]},
+    {"id": "sched-002", "name": "kyc_refresh",         "path": "sample_repo/scripts/job_scheduler.py", "domain": "Compliance", "type": "scheduled", "status": "active", "source": "scheduler", "module": "compliance.kyc_validator",   "function": "run_kyc_refresh_batch",      "risk_tags": ["PII", "audit_required"]},
+    {"id": "sched-003", "name": "daily_aml_screening", "path": "sample_repo/scripts/job_scheduler.py", "domain": "Compliance", "type": "scheduled", "status": "active", "source": "scheduler", "module": "compliance.aml_screening",   "function": "run_daily_aml_screening",    "risk_tags": ["PII", "audit_required"]},
+    {"id": "sched-004", "name": "daily_risk_pipeline", "path": "sample_repo/scripts/job_scheduler.py", "domain": "Risk",       "type": "scheduled", "status": "active", "source": "scheduler", "module": "etl.risk_pipeline",          "function": "run_daily_risk_pipeline",    "risk_tags": ["audit_required", "regulatory_report"]},
+    {"id": "sched-005", "name": "mis_daily_pack",      "path": "sample_repo/scripts/job_scheduler.py", "domain": "Reporting",  "type": "scheduled", "status": "active", "source": "scheduler", "module": "reporting.mis_daily",        "function": "publish_daily_mis_pack",     "risk_tags": []},
+    {"id": "sched-006", "name": "ccar_annual_cycle",   "path": "sample_repo/scripts/job_scheduler.py", "domain": "Reporting",  "type": "scheduled", "status": "active", "source": "scheduler", "module": "reporting.ccar_report",      "function": "run_ccar_annual_cycle",      "risk_tags": ["regulatory_report"]},
+    {"id": "sched-007", "name": "basel_pillar3",       "path": "sample_repo/scripts/job_scheduler.py", "domain": "Reporting",  "type": "scheduled", "status": "active", "source": "scheduler", "module": "reporting.basel3",           "function": "generate_pillar3_disclosure", "risk_tags": ["regulatory_report"]},
+]
+
+# DEPENDS_ON edges: (downstream) -[:DEPENDS_ON]-> (upstream prerequisite)
+# Mirrors the depends_on lists in JobSpec._build_jobs()
+SCHEDULER_JOB_EDGES = [
+    {"src": "sched-002", "tgt": "sched-001", "conf": "verified"},  # kyc_refresh ← customer_ingest
+    {"src": "sched-003", "tgt": "sched-001", "conf": "verified"},  # daily_aml_screening ← customer_ingest
+    {"src": "sched-003", "tgt": "sched-002", "conf": "verified"},  # daily_aml_screening ← kyc_refresh
+    {"src": "sched-004", "tgt": "sched-003", "conf": "verified"},  # daily_risk_pipeline ← daily_aml_screening
+    {"src": "sched-005", "tgt": "sched-004", "conf": "verified"},  # mis_daily_pack ← daily_risk_pipeline
+    {"src": "sched-006", "tgt": "sched-004", "conf": "verified"},  # ccar_annual_cycle ← daily_risk_pipeline
+    {"src": "sched-007", "tgt": "sched-005", "conf": "verified"},  # basel_pillar3 ← mis_daily_pack
+    {"src": "sched-007", "tgt": "sched-006", "conf": "verified"},  # basel_pillar3 ← ccar_annual_cycle
+]
+
+# Map each scheduler DAG node to the underlying core pipeline job id.
+# This enables seeding READS_FROM / WRITES_TO edges for scheduler jobs so
+# orchestration lineage appears connected to datasets in visualization.
+SCHEDULER_TO_CORE_JOB = {
+    "sched-001": "job-001",  # customer_ingest
+    "sched-002": "job-007",  # kyc_refresh         -> kyc_validator
+    "sched-003": "job-008",  # daily_aml_screening -> aml_screening_job
+    "sched-004": "job-005",  # daily_risk_pipeline -> risk_pipeline_orch
+    "sched-005": "job-011",  # mis_daily_pack      -> mis_daily_report
+    "sched-006": "job-009",  # ccar_annual_cycle   -> ccar_report_gen
+    "sched-007": "job-010",  # basel_pillar3       -> basel3_report_gen
+}
 
 # ── Pipelines ─────────────────────────────────────────────────────────────
 
